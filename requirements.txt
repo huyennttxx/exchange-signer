@@ -1,0 +1,4 @@
+# Chạy trên máy Signer — chỉ 3 gói, pin cố định
+pycryptodome==3.23.0
+coincurve==21.0.0
+msgpack==1.1.0

@@ -1,0 +1,3 @@
+# Chỉ cài trong môi trường test, KHÔNG cài lên máy Signer
+-r requirements.txt
+hyperliquid-python-sdk==0.24.0

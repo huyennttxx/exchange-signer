@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+
+# Dữ liệu của máy Signer: keystore chứa key (đã mã hoá) và HMAC secret, không đưa lên git
+keystore.json
+*.keystore.json
+!config.example.json
+
+# OS
+.DS_Store
+Thumbs.db
