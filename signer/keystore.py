@@ -24,7 +24,6 @@ class BadPassphrase(Exception):
 class Key:
     key_id: str
     venue: str
-    allowed_ips: frozenset
     secret: bytes | None  # None → bản ghi không giải mã được (KEY_NOT_LOADED)
     hmac_key: bytes | None = None  # secret xác thực request của BE; None → bản ghi chưa có hoặc lỗi
 
@@ -39,7 +38,7 @@ def derive_master_key(passphrase: bytes, kdf: dict) -> bytes:
 
 
 def _aad(rec: dict) -> bytes:
-    bound = {"key_id": rec["key_id"], "venue": rec["venue"], "allowed_ips": sorted(rec["allowed_ips"])}
+    bound = {"key_id": rec["key_id"], "venue": rec["venue"]}
     return json.dumps(bound, sort_keys=True, separators=(",", ":")).encode()
 
 
@@ -59,13 +58,13 @@ def _decrypt(master: bytes, aad: bytes, box: dict) -> bytes:
 
 
 def _hmac_aad(key_id: str) -> bytes:
-    # Chỉ gắn với key_id: đổi allowed_ips không phải mã hoá lại, nhưng không chép được sang bản ghi khác
+    # Chỉ gắn với key_id: không chép được sang bản ghi khác
     return json.dumps({"key_id": key_id, "purpose": "hmac"}, sort_keys=True, separators=(",", ":")).encode()
 
 
 def seal(master: bytes, rec: dict, secret: bytes) -> dict:
     """Mã hoá private key; giữ nguyên box hmac của rec (nếu có)."""
-    out = {"key_id": rec["key_id"], "venue": rec["venue"], "allowed_ips": sorted(rec["allowed_ips"])}
+    out = {"key_id": rec["key_id"], "venue": rec["venue"]}
     out.update(_encrypt(master, _aad(out), secret))
     if "hmac" in rec:
         out["hmac"] = rec["hmac"]
@@ -73,7 +72,7 @@ def seal(master: bytes, rec: dict, secret: bytes) -> dict:
 
 
 def unseal(master: bytes, rec: dict) -> bytes:
-    # Sai master key, hoặc file bị sửa (kể cả allowed_ips) → ValueError
+    # Sai master key, hoặc file bị sửa (key_id, venue) → ValueError
     return _decrypt(master, _aad(rec), rec)
 
 
@@ -119,6 +118,9 @@ def unlock(data: dict, master: bytes) -> dict[str, Key]:
         try:
             if rec["venue"] not in VENUES:
                 raise ValueError(f"unknown venue {rec['venue']!r}")
+            if "allowed_ips" in rec:
+                # allowed_ips nay nằm trong config.ini; không chuyển định dạng cũ
+                raise ValueError("old keystore format (allowed_ips in record): create a new key")
             secret = unseal(master, rec)
             hmac_key = unseal_hmac(master, rec)
         except (ValueError, KeyError, TypeError) as e:
@@ -127,7 +129,7 @@ def unlock(data: dict, master: bytes) -> dict[str, Key]:
         else:
             if hmac_key is None:
                 log.warning("key %s has no HMAC secret, requests will be rejected: run rotate-hmac", rec["key_id"])
-        keys[rec["key_id"]] = Key(rec["key_id"], rec["venue"], frozenset(rec["allowed_ips"]), secret, hmac_key)
+        keys[rec["key_id"]] = Key(rec["key_id"], rec["venue"], secret, hmac_key)
     return keys
 
 
@@ -137,10 +139,15 @@ def load(path: str) -> dict:
 
 
 def save_atomic(path: str, data: dict) -> None:
+    write_atomic(path, json.dumps(data, indent=2))
+
+
+def write_atomic(path: str, text: str) -> None:
+    """Ghi file tạm, fsync, quyền 600, rồi đổi tên: lỗi giữa chừng thì file cũ còn nguyên."""
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(path)))
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
+            f.write(text)
             f.flush()
             os.fsync(f.fileno())
         os.chmod(tmp, 0o600)

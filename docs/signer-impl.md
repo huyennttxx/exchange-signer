@@ -86,13 +86,14 @@ passphrase ──scrypt(salt)──► master key (32 byte) ──AES-256-GCM─
 |---|---|
 | KDF | `hashlib.scrypt`, `n = 2^17, r = 8, p = 1`, khoảng 128 MB RAM. Phải truyền `maxmem`, vì mặc định chỉ 32 MB |
 | Cipher | AES-256-GCM. Mỗi key một nonce 12 byte ngẫu nhiên |
-| AAD | `{key_id, venue, allowed_ips}` dạng JSON chuẩn hoá |
+| AAD | `{key_id, venue}` dạng JSON chuẩn hoá |
 | Kiểm tra passphrase | Một bản mã của chuỗi cố định (`check`), giải mã được thì passphrase đúng |
 
-**Vì sao đưa `allowed_ips` vào AAD:**
-- `allowed_ips` lưu dạng rõ để dễ xem, nhưng được gắn chặt với bản mã.
-- Ai sửa allowlist trong file mà không có master key thì key đó **không giải mã được** khi khởi động, nên Signer phát hiện ngay.
-- Tương tự, không thể tráo `venue` hay `key_id` giữa các bản ghi.
+**AAD:** không thể tráo `venue` hay `key_id` giữa các bản ghi; sửa một trong hai thì bản ghi đó **không giải mã được**.
+
+`allowed_ips` không nằm trong keystore mà trong section `[key:<key_id>]` của `config.ini`, cùng với symbol và hạn mức của key.
+- File config không được mã hoá: ai sửa được nó thì mở thêm IP, symbol hay nâng hạn mức được. Giữ `config.ini` quyền `0600`, cùng chủ với keystore.
+- Keystore định dạng cũ (bản ghi còn `allowed_ips`) không được chuyển đổi: bản ghi đó nạp ở trạng thái `KEY_NOT_LOADED`, phải tạo key mới.
 
 ### File keystore
 
@@ -107,7 +108,6 @@ Một file JSON, quyền `0600`, chủ sở hữu là user riêng của Signer.
     {
       "key_id": "3f2b8c1e-6d4a-4f7b-9c2e-1a5d8e7f0b34",
       "venue": "binance",
-      "allowed_ips": ["10.0.1.12"],
       "nonce": "…",
       "ciphertext": "…",
       "hmac": { "nonce": "…", "ciphertext": "…" }
@@ -117,7 +117,7 @@ Một file JSON, quyền `0600`, chủ sở hữu là user riêng của Signer.
 ```
 
 - `hmac` là HMAC secret của key (xác thực request của BE), mã hoá riêng bằng cùng master key, AAD = `{key_id, purpose: "hmac"}`.
-  - Gắn với `key_id` nên không chép được sang bản ghi khác; không gắn với `allowed_ips` nên `set-ips` không phải mã hoá lại nó.
+  - Gắn với `key_id` nên không chép được sang bản ghi khác.
   - Bản ghi cũ không có `hmac` vẫn nạp được, nhưng request tới key đó trả `503 KEY_NOT_LOADED` cho tới khi chạy `rotate-hmac`.
 
 - Nội dung được mã hoá là private key thô 32 byte: seed Ed25519 với Binance, secp256k1 với Hyperliquid.
@@ -147,7 +147,7 @@ def derive_master_key(passphrase: bytes, kdf: dict) -> bytes:
 
 
 def _aad(rec: dict) -> bytes:
-    bound = {"key_id": rec["key_id"], "venue": rec["venue"], "allowed_ips": sorted(rec["allowed_ips"])}
+    bound = {"key_id": rec["key_id"], "venue": rec["venue"]}
     return json.dumps(bound, sort_keys=True, separators=(",", ":")).encode()
 
 
@@ -163,7 +163,7 @@ def unseal(master: bytes, rec: dict) -> bytes:
     data = bytes.fromhex(rec["ciphertext"])
     cipher = AES.new(master, AES.MODE_GCM, nonce=bytes.fromhex(rec["nonce"]))
     cipher.update(_aad(rec))
-    # Sai master key, hoặc file bị sửa (kể cả allowed_ips) → ValueError
+    # Sai master key, hoặc file bị sửa (key_id, venue) → ValueError
     return cipher.decrypt_and_verify(data[:-16], data[-16:])
 
 
@@ -201,16 +201,15 @@ Python không xoá được bộ nhớ một cách chắc chắn, nên giảm r�
 
 ## Quản lý key (`admin.py`)
 
-Chạy trực tiếp trên máy Signer. Mọi thao tác ghi đều cần passphrase, vì phải mã hoá lại.
+Chạy trực tiếp trên máy Signer. Mọi thao tác ghi keystore đều cần passphrase, vì phải mã hoá lại. `generate` / `import` / `remove` tự thêm / xoá section `[key:<key_id>]` trong `config.ini` (theo dòng, giữ nguyên comment); IP, symbol và hạn mức trong section thì sửa tay.
 
 | Lệnh | Việc làm |
 |---|---|
-| `generate --venue … --allowed-ip …` | **Sinh keypair ngay trong Signer**, sinh `key_id` (UUID v4), lưu vào keystore. In ra public key (Binance) hoặc địa chỉ ví agent (Hyperliquid) để đăng ký trên sàn |
-| `import --venue … --allowed-ip …` | Nhập private key có sẵn (đọc bằng `getpass`, không hiện ra màn hình, không qua tham số dòng lệnh) |
-| `set-ips <key_id> …` | Đổi allowlist. Phải mã hoá lại bản ghi vì `allowed_ips` nằm trong AAD |
+| `generate --venue …` | **Sinh keypair ngay trong Signer**, sinh `key_id` (UUID v4), lưu vào keystore, thêm section `[key:<key_id>]` vào config (`allowed_ips` để trống, `max_leverage = 40`, `BTCUSDC = 0.1`). In ra public key (Binance) hoặc địa chỉ ví agent (Hyperliquid) để đăng ký trên sàn |
+| `import --venue …` | Nhập private key có sẵn (đọc bằng `getpass`, không hiện ra màn hình, không qua tham số dòng lệnh) |
 | `rotate-hmac <key_id>` | Sinh HMAC secret mới (thay secret cũ), in ra một lần để đưa cho BE |
-| `remove <key_id>` | Xoá bản ghi |
-| `list` | Liệt kê `key_id`, `venue`, `allowed_ips`, đánh dấu key chưa có HMAC. Không hiện gì bí mật |
+| `remove <key_id>` | Xoá bản ghi và section của key trong config |
+| `list` | Liệt kê `key_id`, `venue`, `allowed_ips` (từ config), đánh dấu key chưa có HMAC. Không hiện gì bí mật |
 | `change-passphrase` | Giải mã toàn bộ rồi mã hoá lại bằng master key mới |
 
 - Ưu tiên `generate` hơn `import`: private key sinh ra trong Signer và **không bao giờ rời khỏi máy**.
@@ -327,10 +326,10 @@ def check_qty(raw, limit: Decimal) -> None:
         raise Reject("QTY_EXCEEDS_LIMIT", f"quantity {raw} must be > 0 and < {limit}")
 
 
-def check_asset(a, btc_asset: int) -> None:
+def check_asset(a, allowed) -> None:
     # bool là subclass của int: False == 0 → phải so cả kiểu
-    if type(a) is not int or a != btc_asset:
-        raise Reject("SYMBOL_NOT_ALLOWED", f"asset {a!r} is not BTC")
+    if type(a) is not int or a not in allowed:
+        raise Reject("SYMBOL_NOT_ALLOWED", f"asset {a!r} is not allowed for this key")
 ```
 
 | Điểm | Cách xử lý |
@@ -361,7 +360,7 @@ def check_asset(a, btc_asset: int) -> None:
 - **Policy:** mỗi quy tắc trong `signer-api.md` có ít nhất một test cho trường hợp bị chặn, kèm một payload hợp lệ đi qua được.
 - **Keystore:**
   - sai passphrase → không mở được;
-  - sửa `allowed_ips` hoặc `venue` trong file → bản ghi đó không giải mã được;
+  - sửa `key_id` hoặc `venue` trong file → bản ghi đó không giải mã được;
   - ghi atomic → file cũ còn nguyên nếu ghi lỗi giữa chừng.
 
 ---

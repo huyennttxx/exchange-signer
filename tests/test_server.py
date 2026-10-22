@@ -4,31 +4,72 @@ import threading
 import unittest
 from urllib.parse import unquote
 
+from signer import config
 from signer.auth import SIGNATURE_HEADER, TIMESTAMP_HEADER, compute_signature
 from signer.keystore import Key
-from signer.server import Signer, make_server
-from tests.helpers import BN, ED25519_SEED, LIMITS, NOW, SECP256K1_KEY, bn, hl
+from signer.server import Signer, build_rules, make_server
+from tests.helpers import BN, ED25519_SEED, MAX_AGE_MS, NOW, SECP256K1_KEY, bn, hl
 
 BINANCE_ID = "3f2b8c1e-6d4a-4f7b-9c2e-1a5d8e7f0b34"
 HL_ID = "a91d4e7c-2b38-4c55-8f0a-6e3b9d1c7f22"
 OTHER_IP_ID = "11111111-1111-4111-8111-111111111111"
 BROKEN_ID = "22222222-2222-4222-8222-222222222222"
 NO_HMAC_ID = "33333333-3333-4333-8333-333333333333"
+NO_SECTION_ID = "44444444-4444-4444-8444-444444444444"
+ETH_ID = "55555555-5555-4555-8555-555555555555"
 # Mỗi key một HMAC secret riêng
-HMAC = {BINANCE_ID: b"b" * 64, HL_ID: b"h" * 64, OTHER_IP_ID: b"o" * 64}
+HMAC = {BINANCE_ID: b"b" * 64, HL_ID: b"h" * 64, OTHER_IP_ID: b"o" * 64, NO_SECTION_ID: b"n" * 64,
+        ETH_ID: b"e" * 64}
+CONFIG = f"""
+[server]
+max_payload_age_ms = {MAX_AGE_MS}
+
+[key:{BINANCE_ID}]
+allowed_ips = 127.0.0.1
+max_leverage = 5
+BTCUSDT = 0.01
+
+[key:{HL_ID}]
+allowed_ips = 127.0.0.1
+max_leverage = 5
+BTCUSDC = 0.01
+
+[key:{OTHER_IP_ID}]
+allowed_ips = 10.0.1.12
+max_leverage = 5
+BTCUSDT = 0.01
+
+[key:{BROKEN_ID}]
+allowed_ips = 127.0.0.1
+max_leverage = 5
+BTCUSDT = 0.01
+
+[key:{NO_HMAC_ID}]
+allowed_ips = 127.0.0.1
+max_leverage = 5
+BTCUSDT = 0.01
+
+[key:{ETH_ID}]
+allowed_ips = 127.0.0.1
+max_leverage = 5
+ETHUSDT = 1
+"""
 
 
 class ServerTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         keys = {
-            BINANCE_ID: Key(BINANCE_ID, "binance", frozenset({"127.0.0.1"}), ED25519_SEED, HMAC[BINANCE_ID]),
-            HL_ID: Key(HL_ID, "hyperliquid", frozenset({"127.0.0.1"}), SECP256K1_KEY, HMAC[HL_ID]),
-            OTHER_IP_ID: Key(OTHER_IP_ID, "binance", frozenset({"10.0.1.12"}), ED25519_SEED, HMAC[OTHER_IP_ID]),
-            BROKEN_ID: Key(BROKEN_ID, "binance", frozenset({"127.0.0.1"}), None),
-            NO_HMAC_ID: Key(NO_HMAC_ID, "binance", frozenset({"127.0.0.1"}), ED25519_SEED),
+            BINANCE_ID: Key(BINANCE_ID, "binance", ED25519_SEED, HMAC[BINANCE_ID]),
+            HL_ID: Key(HL_ID, "hyperliquid", SECP256K1_KEY, HMAC[HL_ID]),
+            OTHER_IP_ID: Key(OTHER_IP_ID, "binance", ED25519_SEED, HMAC[OTHER_IP_ID]),
+            BROKEN_ID: Key(BROKEN_ID, "binance", None),
+            NO_HMAC_ID: Key(NO_HMAC_ID, "binance", ED25519_SEED),
+            NO_SECTION_ID: Key(NO_SECTION_ID, "binance", ED25519_SEED, HMAC[NO_SECTION_ID]),
+            ETH_ID: Key(ETH_ID, "binance", ED25519_SEED, HMAC[ETH_ID]),
         }
-        cls.server = make_server(Signer(keys, LIMITS, True, clock=lambda: NOW), "127.0.0.1", 0)
+        cfg = config.parse(config.parse_text(CONFIG))
+        cls.server = make_server(Signer(keys, cfg, clock=lambda: NOW), "127.0.0.1", 0)
         cls.port = cls.server.server_address[1]
         threading.Thread(target=cls.server.serve_forever, daemon=True).start()
 
@@ -86,9 +127,29 @@ class ServerTest(unittest.TestCase):
         unknown = self.sign("00000000-0000-4000-8000-000000000000", "place_order", bn(**BN["place_order"]))
         wrong_ip = self.sign(OTHER_IP_ID, "place_order", bn(**BN["place_order"]))
         non_string = self.sign(["x"], "place_order", bn(**BN["place_order"]))
+        no_section = self.sign(NO_SECTION_ID, "place_order", bn(**BN["place_order"]))
         self.assertEqual(unknown[0], 401)
         self.assertEqual(unknown, wrong_ip)
         self.assertEqual(unknown, non_string)
+        self.assertEqual(unknown, no_section)
+
+    def test_symbols_per_key(self):
+        eth = bn(**{**BN["place_order"], "symbol": "ETHUSDT", "quantity": "0.5"})
+        self.assertEqual(self.sign(ETH_ID, "place_order", eth)[0], 200)
+        status, _, body = self.sign(BINANCE_ID, "place_order", eth)
+        self.assertEqual((status, body["error"]), (403, "SYMBOL_NOT_ALLOWED"))
+        status, _, body = self.sign(ETH_ID, "place_order", bn(**BN["place_order"]))
+        self.assertEqual((status, body["error"]), (403, "SYMBOL_NOT_ALLOWED"))
+
+    def test_build_rules_reports_unknown_hyperliquid_symbol(self):
+        cfg = config.parse(config.parse_text(CONFIG.replace("BTCUSDC = 0.01", "NOPEUSDC = 0.01")))
+        keys = {HL_ID: Key(HL_ID, "hyperliquid", SECP256K1_KEY, HMAC[HL_ID]),
+                NO_SECTION_ID: Key(NO_SECTION_ID, "binance", ED25519_SEED, HMAC[NO_SECTION_ID])}
+        rules, errors, warnings = build_rules(keys, cfg)
+        self.assertEqual(list(rules), [])
+        self.assertIn("NOPEUSDC", errors[0])
+        self.assertTrue(any(NO_SECTION_ID in w for w in warnings))
+        self.assertTrue(any(BINANCE_ID in w for w in warnings))
 
     def test_hmac_failures_are_indistinguishable(self):
         raw = json.dumps({"key_id": BINANCE_ID, "op": "place_order", "payload": bn(**BN["place_order"])}).encode()
@@ -102,8 +163,8 @@ class ServerTest(unittest.TestCase):
             "timestamp not signed": {**good, TIMESTAMP_HEADER: str(NOW + 1)},
             "bad timestamp": {**good, TIMESTAMP_HEADER: "-1"},
             "short signature": {**good, SIGNATURE_HEADER: good[SIGNATURE_HEADER][:-2]},
-            "stale": self.hmac_headers(raw, HMAC[BINANCE_ID], NOW - LIMITS.max_payload_age_ms - 1),
-            "future": self.hmac_headers(raw, HMAC[BINANCE_ID], NOW + LIMITS.max_payload_age_ms + 1),
+            "stale": self.hmac_headers(raw, HMAC[BINANCE_ID], NOW - MAX_AGE_MS - 1),
+            "future": self.hmac_headers(raw, HMAC[BINANCE_ID], NOW + MAX_AGE_MS + 1),
         }
         for name, headers in cases.items():
             with self.subTest(name):
@@ -125,7 +186,7 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(self.request("POST", "/v1/sign", raw=raw, headers=headers)[0], 200)
 
     def test_hmac_age_boundary(self):
-        for ts in (NOW - LIMITS.max_payload_age_ms, NOW + LIMITS.max_payload_age_ms):
+        for ts in (NOW - MAX_AGE_MS, NOW + MAX_AGE_MS):
             with self.subTest(ts=ts):
                 self.assertEqual(self.sign(BINANCE_ID, "place_order", bn(**BN["place_order"]), ts=ts)[0], 200)
 

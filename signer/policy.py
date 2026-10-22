@@ -1,8 +1,16 @@
+from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 
 from signer.errors import Reject
 
 OPS = ("place_order", "cancel_order", "place_conditional", "cancel_conditional", "set_leverage")
+
+
+@dataclass(frozen=True)
+class Rule:
+    """Giới hạn của một key, đã đổi sang tên của sàn: symbol Binance hoặc chỉ số asset Hyperliquid → max_qty."""
+    max_leverage: int
+    allowed: dict
 
 
 def check_op(op) -> None:
@@ -16,7 +24,8 @@ def check_params(where: str, keys, allowed) -> None:
         raise Reject("PARAM_NOT_ALLOWED", f"{where}: parameter(s) not allowed: {', '.join(map(str, extra))}")
 
 
-def check_qty(raw, limit: Decimal) -> None:
+def check_qty(raw, limit: Decimal | None, allow_zero: bool = False) -> None:
+    """limit = None → không giới hạn trên (lệnh reduce-only); allow_zero → nhận 0 (đóng cả vị thế)."""
     q = None
     # bool là subclass của int: True → Decimal(1) → phải loại trước
     if isinstance(raw, (str, int, float)) and not isinstance(raw, bool):
@@ -27,14 +36,16 @@ def check_qty(raw, limit: Decimal) -> None:
     # Decimal("NaN"), Decimal("Infinity") vẫn parse được
     if q is None or not q.is_finite():
         raise Reject("QTY_EXCEEDS_LIMIT", f"quantity {raw!r} is not a number")
-    if not (0 < q < limit):
-        raise Reject("QTY_EXCEEDS_LIMIT", f"quantity {raw} must be > 0 and < {limit}")
+    if q < 0 or (q == 0 and not allow_zero):
+        raise Reject("QTY_EXCEEDS_LIMIT", f"quantity {raw} must be {'>=' if allow_zero else '>'} 0")
+    if limit is not None and q >= limit:
+        raise Reject("QTY_EXCEEDS_LIMIT", f"quantity {raw} must be < {limit}")
 
 
-def check_asset(a, btc_asset: int) -> None:
+def check_asset(a, allowed) -> None:
     # bool là subclass của int: False == 0 → phải so cả kiểu
-    if type(a) is not int or a != btc_asset:
-        raise Reject("SYMBOL_NOT_ALLOWED", f"asset {a!r} is not BTC")
+    if type(a) is not int or a not in allowed:
+        raise Reject("SYMBOL_NOT_ALLOWED", f"asset {a!r} is not allowed for this key")
 
 
 def check_leverage(lev, limit: int) -> None:

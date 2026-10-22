@@ -13,23 +13,26 @@ class KeystoreTest(unittest.TestCase):
     def setUp(self):
         self.data, self.master = keystore.new_keystore(b"correct horse battery", n=FAST_N)
         self.secret = os.urandom(32)
-        rec = {"key_id": "k1", "venue": "binance", "allowed_ips": ["10.0.1.12"]}
+        rec = {"key_id": "k1", "venue": "binance"}
         self.data["keys"].append(keystore.seal(self.master, rec, self.secret))
 
     def test_roundtrip(self):
         master = keystore.open_master(self.data, b"correct horse battery")
         keys = keystore.unlock(self.data, master)
         self.assertEqual(keys["k1"].secret, self.secret)
-        self.assertEqual(keys["k1"].allowed_ips, frozenset({"10.0.1.12"}))
+        self.assertNotIn("allowed_ips", self.data["keys"][0])  # IP nằm trong config.ini
 
     def test_wrong_passphrase(self):
         with self.assertRaises(keystore.BadPassphrase):
             keystore.open_master(self.data, b"wrong")
 
-    def test_tampered_allowed_ips_not_loaded(self):
-        self.data["keys"][0]["allowed_ips"].append("6.6.6.6")
-        keys = keystore.unlock(self.data, self.master)
+    def test_old_format_with_allowed_ips_not_loaded(self):
+        # Không chuyển định dạng cũ: bản ghi còn allowed_ips → KEY_NOT_LOADED
+        self.data["keys"][0]["allowed_ips"] = ["10.0.1.12"]
+        with self.assertLogs("signer.keystore", "ERROR") as logs:
+            keys = keystore.unlock(self.data, self.master)
         self.assertIsNone(keys["k1"].secret)
+        self.assertIn("old keystore format", logs.output[0])
 
     def test_tampered_venue_not_loaded(self):
         self.data["keys"][0]["venue"] = "hyperliquid"
@@ -39,12 +42,6 @@ class KeystoreTest(unittest.TestCase):
         self.data["keys"][0]["key_id"] = "k2"
         self.assertIsNone(keystore.unlock(self.data, self.master)["k2"].secret)
 
-    def test_allowed_ips_order_does_not_matter(self):
-        rec = {"key_id": "k2", "venue": "binance", "allowed_ips": ["10.0.0.2", "10.0.0.1"]}
-        sealed = keystore.seal(self.master, rec, self.secret)
-        sealed["allowed_ips"] = ["10.0.0.1", "10.0.0.2"]
-        self.assertEqual(keystore.unseal(self.master, sealed), self.secret)
-
     def test_hmac_roundtrip_and_legacy_record(self):
         # Bản ghi cũ chưa có hmac: vẫn nạp private key, hmac_key = None (request sẽ bị 503)
         self.assertIsNone(keystore.unlock(self.data, self.master)["k1"].hmac_key)
@@ -53,8 +50,7 @@ class KeystoreTest(unittest.TestCase):
         self.assertEqual((key.secret, key.hmac_key), (self.secret, b"s" * 64))
 
     def test_hmac_box_bound_to_key_id(self):
-        rec2 = keystore.seal(self.master, {"key_id": "k2", "venue": "binance", "allowed_ips": ["10.0.1.12"]},
-                             self.secret)
+        rec2 = keystore.seal(self.master, {"key_id": "k2", "venue": "binance"}, self.secret)
         self.data["keys"].append(keystore.seal_hmac(self.master, rec2, b"s" * 64))
         # Chép box hmac của k2 sang k1 → k1 không nạp được
         self.data["keys"][0]["hmac"] = self.data["keys"][1]["hmac"]

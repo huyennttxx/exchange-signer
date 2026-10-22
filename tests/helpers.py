@@ -1,9 +1,11 @@
 from decimal import Decimal
 
-from signer.config import Limits
+from signer.policy import Rule
 
 NOW = 1729500000000
-LIMITS = Limits(max_qty_btc=Decimal("0.01"), max_leverage=5, max_payload_age_ms=10_000)
+MAX_AGE_MS = 10_000
+RULE_BN = Rule(max_leverage=5, allowed={"BTCUSDT": Decimal("0.01")})
+RULE_HL = Rule(max_leverage=5, allowed={0: Decimal("0.01")})  # 0 = BTC trên mainnet
 CLOID = "0x8c1f0000000000000000000000000001"
 
 # RFC 8032, mục 7.1, TEST 1 — dùng làm key cho test

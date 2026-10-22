@@ -4,13 +4,12 @@ Có thêm tham số thì chạy thẳng lệnh signer.admin, ví dụ: python -m
 Đổi passphrase và config không có trong menu: dùng change-passphrase, config-show, config-edit, config-set.
 """
 import argparse
-import re
 import sys
 
 from signer import admin, config, keyops, keystore
 
 MENU = [
-    ("1", "Xem key (danh sách, public key / địa chỉ agent, sửa IP, HMAC secret, xoá)"),
+    ("1", "Xem key (danh sách, public key / địa chỉ agent, HMAC secret, xoá)"),
     ("2", "Thêm key mới (sinh key trên máy này)"),
     ("3", "Nhập key có sẵn"),
     ("q", "Thoát"),
@@ -52,16 +51,8 @@ class Menu:
         return None if i is None else keystore.VENUES[i]
 
     @staticmethod
-    def ask_ips() -> list[str] | None:
-        while True:
-            line = input("IP được phép (cách nhau bằng dấu cách hoặc dấu phẩy), Enter để huỷ: ")
-            ips = [ip for ip in re.split(r"[\s,]+", line) if ip]
-            if not ips:
-                return None
-            try:
-                return keyops.normalize_ips(ips)
-            except keyops.KeyOpError as e:
-                print(f"IP không hợp lệ: {e}")
+    def show_ips(ips: str | None) -> str:
+        return "(chưa có trong config)" if ips is None else ips or "(chưa có IP)"
 
     def pick_key(self, title: str = "Key:", cancel: str = "huỷ") -> dict | None:
         try:
@@ -72,41 +63,33 @@ class Menu:
         if not keys:
             print("Chưa có key nào.")
             return None
-        i = self.choose(title, [f"{k['key_id']}  {k['venue']:<12} {', '.join(k['allowed_ips'])}"
+        ips = config.read_key_ips(self.config_path)
+        for k in keys:
+            k["allowed_ips"] = ips.get(k["key_id"])
+        i = self.choose(title, [f"{k['key_id']}  {k['venue']:<12} {self.show_ips(k['allowed_ips'])}"
                                 + ("" if k["hmac"] else "  (chưa có HMAC)") for k in keys], cancel)
         return None if i is None else keys[i]
 
     def add_key(self, command: str) -> None:
+        # Không hỏi IP: IP được phép sửa tay trong config.ini
         venue = self.ask_venue()
-        ips = venue and self.ask_ips()
-        if not ips:
-            return
-        args = [arg for ip in ips for arg in ("--allowed-ip", ip)]
-        if self.admin(command, "--venue", venue, *args):
-            print(RELOAD_HINT)
-
-    def set_ips(self, key: dict) -> None:
-        print(f"IP hiện tại: {', '.join(key['allowed_ips'])}")
-        ips = self.ask_ips()
-        if ips and self.admin("set-ips", key["key_id"], *ips):
+        if venue and self.admin(command, "--venue", venue):
+            print(f"Key chưa có IP được phép: điền allowed_ips trong section của key ở {self.config_path}.")
             print(RELOAD_HINT)
 
     def view(self) -> None:
         # Danh sách không cần passphrase; chỉ khi chọn key rồi chọn việc mới hỏi
-        key = self.pick_key("Key (cột: key_id, sàn, IP được phép). Chọn một key để xem public key, sửa IP, "
+        key = self.pick_key("Key (cột: key_id, sàn, IP được phép). Chọn một key để xem public key, "
                             "tạo HMAC secret hoặc xoá:", "quay lại")
         if not key:
             return
         i = self.choose(f"Key {key['key_id']} ({key['venue']}):",
-                        ["Xem public key / địa chỉ agent", "Sửa IP được phép", "Tạo HMAC secret mới", "Xoá key"],
-                        "quay lại")
+                        ["Xem public key / địa chỉ agent", "Tạo HMAC secret mới", "Xoá key"], "quay lại")
         if i == 0:
             self.admin("show", key["key_id"])
         elif i == 1:
-            self.set_ips(key)
-        elif i == 2:
             self.rotate_hmac(key)
-        elif i == 3:
+        elif i == 2:
             self.remove(key)
 
     def rotate_hmac(self, key: dict) -> None:

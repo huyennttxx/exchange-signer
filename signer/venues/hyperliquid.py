@@ -1,12 +1,15 @@
+import configparser
+import os
+
 import msgpack
 from coincurve import PrivateKey
 from Crypto.Hash import keccak
 
 from signer import policy
-from signer.config import Limits
 from signer.errors import Reject
+from signer.policy import Rule
 
-BTC_ASSET = 0
+ASSETS_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hyperliquid_assets.ini")
 
 ALLOWED_PAYLOAD = ("action", "nonce")
 ALLOWED_ORDER_ACTION = ("type", "orders", "grouping")
@@ -16,6 +19,30 @@ ALLOWED_TRIGGER = ("isMarket", "triggerPx", "tpsl")
 ALLOWED_CANCEL_ACTION = ("type", "cancels")
 ALLOWED_CANCEL = ("asset", "cloid")
 ALLOWED_LEVERAGE_ACTION = ("type", "asset", "isCross", "leverage")
+
+
+_asset_tables: dict[str, dict[str, int]] = {}
+
+
+def asset_table(mainnet: bool) -> dict[str, int]:
+    """Tên symbol (<coin>USDC) → chỉ số asset, đọc từ hyperliquid_assets.ini một lần."""
+    net = "mainnet" if mainnet else "testnet"
+    if net not in _asset_tables:
+        cp = configparser.ConfigParser(interpolation=None)
+        cp.optionxform = str  # kPEPE ≠ KPEPE
+        with open(ASSETS_FILE, encoding="utf-8") as f:
+            cp.read_file(f)
+        if not cp.has_section(net):
+            raise ValueError(f"{ASSETS_FILE} has no [{net}] section")
+        table = {}
+        for name, raw in cp[net].items():
+            if not raw.isdigit():
+                raise ValueError(f"{ASSETS_FILE} [{net}] {name} = {raw!r}: asset must be an integer >= 0")
+            table[name] = int(raw)
+        if len(set(table.values())) != len(table):
+            raise ValueError(f"{ASSETS_FILE} [{net}]: duplicate asset index")
+        _asset_tables[net] = table
+    return _asset_tables[net]
 
 
 def _keccak(data: bytes) -> bytes:
@@ -69,7 +96,7 @@ def _check_order(i: int, order) -> None:
         policy.check_params(f"{where}.t.trigger", _obj(f"{where}.t.trigger", t["trigger"]), ALLOWED_TRIGGER)
 
 
-def verify(op: str, payload, limits: Limits, now_ms: int) -> None:
+def verify(op: str, payload, rule: Rule, max_age_ms: int, now_ms: int) -> None:
     payload = _obj("payload", payload)
     action = _obj("payload.action", payload.get("action"))
 
@@ -86,8 +113,11 @@ def verify(op: str, payload, limits: Limits, now_ms: int) -> None:
         if len(orders) != 1:
             raise Reject("TOO_MANY_ORDERS", f"orders must contain exactly 1 order, got {len(orders)}")
         order = orders[0]
-        policy.check_asset(order.get("a"), BTC_ASSET)
-        policy.check_qty(order.get("s"), limits.max_qty_btc)
+        policy.check_asset(order.get("a"), rule.allowed)
+        # Lệnh reduce-only (r = true) chỉ giảm vị thế → không giới hạn khối lượng.
+        # positionTpsl: s = 0 nghĩa là đóng cả vị thế
+        policy.check_qty(order.get("s"), None if order.get("r") is True else rule.allowed[order["a"]],
+                         allow_zero=op == "place_conditional")
         if op == "place_conditional" and not (order.get("r") is True and "trigger" in order["t"]):
             raise Reject("MUST_CLOSE_POSITION", "conditional order must have r = true and t.trigger")
     elif op in ("cancel_order", "cancel_conditional"):
@@ -98,15 +128,15 @@ def verify(op: str, payload, limits: Limits, now_ms: int) -> None:
         for i, c in enumerate(cancels):
             policy.check_params(f"cancels[{i}]", _obj(f"cancels[{i}]", c), ALLOWED_CANCEL)
         for c in cancels:
-            policy.check_asset(c.get("asset"), BTC_ASSET)
+            policy.check_asset(c.get("asset"), rule.allowed)
     else:
         policy.check_params("action", action, ALLOWED_LEVERAGE_ACTION)
-        policy.check_asset(action.get("asset"), BTC_ASSET)
+        policy.check_asset(action.get("asset"), rule.allowed)
         if action.get("isCross") is not True:
             raise Reject("LEVERAGE_EXCEEDS_LIMIT", "isCross must be true")
-        policy.check_leverage(action.get("leverage"), limits.max_leverage)
+        policy.check_leverage(action.get("leverage"), rule.max_leverage)
 
-    policy.check_fresh("nonce", payload.get("nonce"), now_ms, limits.max_payload_age_ms)
+    policy.check_fresh("nonce", payload.get("nonce"), now_ms, max_age_ms)
 
     try:
         msgpack.packb(action)

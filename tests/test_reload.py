@@ -2,10 +2,10 @@ import json
 import os
 import tempfile
 import unittest
+from unittest import mock
 
-from signer import keyops, keystore
+from signer import config, keyops, keystore, server
 from signer.server import KeyReloader, Signer
-from tests.helpers import LIMITS
 
 PASS = b"correct horse battery staple"
 
@@ -14,41 +14,70 @@ class ReloadTest(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
         self.path = os.path.join(self.dir.name, "ks.json")
+        self.cfg = os.path.join(self.dir.name, "config.ini")
         data, master = keystore.new_keystore(PASS, n=2**10)
         keystore.save_atomic(self.path, data)
-        self.first = keyops.add(self.path, PASS, "binance", ["10.0.1.12"])["key_id"]
+        self.first = self.add("binance")
         data = keystore.load(self.path)
-        self.signer = Signer(keystore.unlock(data, master), LIMITS, True)
-        self.reloader = KeyReloader(self.path, master, self.signer)
+        self.signer = Signer(keystore.unlock(data, master), config.load(self.cfg))
+        self.reloader = KeyReloader(self.path, self.cfg, master, self.signer)
 
     def tearDown(self):
         self.dir.cleanup()
 
-    def test_unchanged_file_is_not_reloaded(self):
+    def add(self, venue) -> str:
+        key_id = keyops.add(self.path, PASS, venue)["key_id"]
+        config.add_key_section(self.cfg, self.path, key_id)
+        return key_id
+
+    def edit_config(self, old: str, new: str) -> None:
+        """Sửa tay config, như người vận hành."""
+        with open(self.cfg, encoding="utf-8") as f:
+            text = f.read()
+        assert old in text
+        with open(self.cfg, "w", encoding="utf-8") as f:
+            f.write(text.replace(old, new, 1))
+
+    def test_unchanged_files_are_not_reloaded(self):
         keys = self.signer.keys
         self.assertFalse(self.reloader.reload_if_changed())
         self.assertIs(self.signer.keys, keys)
 
-    def test_add_set_ips_remove(self):
-        second = keyops.add(self.path, PASS, "hyperliquid", ["10.0.1.13"])["key_id"]
+    def test_add_edit_ips_remove(self):
+        second = self.add("hyperliquid")
         self.assertTrue(self.reloader.reload_if_changed())
         self.assertIsNotNone(self.signer.keys[second].secret)
+        self.assertIn(second, self.signer.state.rules)
 
-        keyops.set_ips(self.path, PASS, second, ["10.0.2.1"])
+        # Chỉ sửa config cũng nạp lại
+        self.edit_config(f"[key:{second}]\nallowed_ips =", f"[key:{second}]\nallowed_ips = 10.0.2.1")
         self.assertTrue(self.reloader.reload_if_changed())
-        self.assertEqual(self.signer.keys[second].allowed_ips, frozenset({"10.0.2.1"}))
+        self.assertEqual(self.signer.state.cfg.keys[second].allowed_ips, frozenset({"10.0.2.1"}))
 
         keyops.remove(self.path, PASS, self.first)
+        config.remove_key_section(self.cfg, self.first)
         self.assertTrue(self.reloader.reload_if_changed())
         self.assertEqual(set(self.signer.keys), {second})
+        self.assertEqual(set(self.signer.state.cfg.keys), {second})
 
-    def test_hmac_kept_across_set_ips_and_passphrase_change(self):
+    def test_server_fields_need_restart(self):
+        config.update(self.cfg, self.path, {"port": "9090"})
+        with self.assertLogs("signer", "WARNING") as logs:
+            self.assertTrue(self.reloader.reload_if_changed())
+        self.assertIn("restart", "\n".join(logs.output))
+        self.assertEqual(self.signer.state.cfg.port, 8080)
+
+    def test_broken_config_keeps_current_state(self):
+        state = self.signer.state
+        with open(self.cfg, "a", encoding="utf-8") as f:
+            f.write("\n[oops]\n")
+        with self.assertLogs("signer", "ERROR"):
+            self.assertFalse(self.reloader.reload_if_changed())
+        self.assertIs(self.signer.state, state)
+
+    def test_hmac_kept_across_passphrase_change(self):
         hmac_key = self.signer.keys[self.first].hmac_key
         self.assertEqual(len(hmac_key), 64)
-        keyops.set_ips(self.path, PASS, self.first, ["10.0.2.1"])
-        self.assertTrue(self.reloader.reload_if_changed())
-        self.assertEqual(self.signer.keys[self.first].hmac_key, hmac_key)
-
         keyops.change_passphrase(self.path, PASS, b"another long passphrase")
         data = keystore.load(self.path)
         keys = keystore.unlock(data, keystore.open_master(data, b"another long passphrase"))
@@ -66,9 +95,10 @@ class ReloadTest(unittest.TestCase):
 
     def test_tampered_record_not_loaded(self):
         data = keystore.load(self.path)
-        data["keys"][0]["allowed_ips"].append("6.6.6.6")
+        data["keys"][0]["venue"] = "hyperliquid"
         keystore.save_atomic(self.path, data)
-        self.assertTrue(self.reloader.reload_if_changed())
+        with self.assertLogs("signer", "ERROR"):
+            self.assertTrue(self.reloader.reload_if_changed())
         self.assertIsNone(self.signer.keys[self.first].secret)
 
     def test_changed_passphrase_keeps_current_keys(self):
@@ -90,6 +120,15 @@ class ReloadTest(unittest.TestCase):
         with self.assertLogs("signer", "ERROR"):
             self.assertFalse(self.reloader.reload_if_changed())
         self.assertIs(self.signer.keys, keys)
+
+    def test_main_refuses_unknown_hyperliquid_symbol(self):
+        hl = self.add("hyperliquid")
+        section = config.new_key_section(hl)
+        self.edit_config(section, section.replace("BTCUSDC = 0.1", "NOPEUSDC = 0.1"))
+        with mock.patch.object(server, "read_passphrase", return_value=PASS), \
+                self.assertLogs("signer", "ERROR") as logs:
+            self.assertEqual(server.main(["--config", self.cfg]), 1)
+        self.assertIn(f"[key:{hl}]", "\n".join(logs.output))
 
     def test_wrong_version_keeps_current_keys(self):
         data = keystore.load(self.path)

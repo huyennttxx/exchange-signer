@@ -1,6 +1,8 @@
 """Quản lý keystore và config. Chạy trực tiếp trên máy Signer.
 
-Đổi key: áp dụng bằng kill -HUP <pid Signer> (Linux) hoặc restart. Đổi config: phải restart.
+IP được phép, symbol, hạn mức: sửa tay section [key:…] trong config.
+Đổi key hay section [key:…]: áp dụng bằng kill -HUP <pid Signer> (Linux) hoặc restart.
+Đổi [server]: phải restart.
 """
 import argparse
 import getpass
@@ -40,10 +42,18 @@ def _add(a, secret: bytes | None) -> None:
         # Lần đầu: tạo keystore luôn. Hỏi passphrase mới 2 lần, để gõ nhầm đường dẫn thì dễ nhận ra
         print(f"{a.keystore} not found, creating a new keystore")
         passphrase = _new_passphrase()
-    result = keyops.add(a.keystore, passphrase, a.venue, a.allowed_ip, secret)
+    result = keyops.add(a.keystore, passphrase, a.venue, secret)
     print(f"key_id: {result['key_id']}")
     _print_public(result["public"])
     _print_hmac(result["key_id"], result["hmac_secret"])
+    try:
+        section = config.add_key_section(a.config, a.keystore, result["key_id"])
+        print(f"added to {a.config}:\n{section}", end="")
+        print(f"No allowed IP yet: fill in allowed_ips (and symbols, max_leverage) in {a.config} by hand")
+    except (OSError, ValueError) as e:
+        # Key đã lưu trong keystore: chỉ thiếu section, thêm tay được
+        section = config.new_key_section(result["key_id"])
+        print(f"WARNING: cannot update {a.config} ({e}). Add this section by hand:\n{section}", end="")
 
 
 def cmd_init(a) -> None:
@@ -66,11 +76,6 @@ def cmd_import(a) -> None:
     _add(a, secret)
 
 
-def cmd_set_ips(a) -> None:
-    result = keyops.set_ips(a.keystore, _passphrase(), a.key_id, a.ip)
-    print(f"{a.key_id}: allowed_ips = {', '.join(result['allowed_ips'])}")
-
-
 def cmd_rotate_hmac(a) -> None:
     _print_hmac(a.key_id, keyops.rotate_hmac(a.keystore, _passphrase(), a.key_id))
     print("The old secret stops working once the signer reloads the keystore")
@@ -79,11 +84,16 @@ def cmd_rotate_hmac(a) -> None:
 def cmd_remove(a) -> None:
     keyops.remove(a.keystore, _passphrase(), a.key_id)
     print(f"removed {a.key_id}")
+    if config.remove_key_section(a.config, a.key_id):
+        print(f"removed [key:{a.key_id}] from {a.config}")
 
 
 def cmd_list(a) -> None:
+    ips = config.read_key_ips(a.config)
     for k in keyops.list_keys(a.keystore):
-        print(f"{k['key_id']}  {k['venue']:<12} {', '.join(k['allowed_ips'])}" + ("" if k["hmac"] else "  (no HMAC)"))
+        shown = ips.get(k["key_id"])
+        print(f"{k['key_id']}  {k['venue']:<12} {'(no config section)' if shown is None else shown or '(no IP)'}"
+              + ("" if k["hmac"] else "  (no HMAC)"))
 
 
 def cmd_show(a) -> None:
@@ -101,13 +111,19 @@ def _show_value(v) -> str:
 
 def cmd_config_show(a) -> None:
     exists = os.path.exists(a.config)
-    raw = config.load_raw(a.config) if exists else {}
-    if not isinstance(raw, dict):
-        sys.exit(f"{a.config} is not a JSON object, fix it by hand")
+    raw = config.load_raw(a.config) if exists else {config.SERVER: {}, "keys": {}}
     print(f"config:   {os.path.abspath(a.config)}" + ("" if exists else " (not found)"))
-    print(f"keystore: {raw.get('keystore', config.DEFAULT_KEYSTORE) if exists else a.keystore}")
+    print(f"keystore: {config.get(raw, 'keystore') if exists else a.keystore}")
     for f in config.FIELDS:
         print(f"  {f:<20} {_show_value(config.get(raw, f))}")
+    for key_id, opts in raw["keys"].items():
+        print(f"[key:{key_id}]")
+        for k, v in opts.items():
+            print(f"  {k:<20} {v}")
+    if keyops.exists(a.keystore):
+        for k in keyops.list_keys(a.keystore):
+            if k["key_id"] not in raw["keys"]:
+                print(f"key {k['key_id']} ({k['venue']}): no [key:…] section, cannot sign")
     if exists:
         try:
             config.parse(raw)
@@ -132,10 +148,8 @@ def cmd_config_set(a) -> None:
 
 def cmd_config_edit(a) -> None:
     new = not os.path.exists(a.config)
-    # Field server chưa có thì hiện giá trị mặc định; limits không có mặc định, phải tự nhập
-    raw = {} if new else config.load_raw(a.config)
-    if not isinstance(raw, dict):
-        sys.exit(f"{a.config} is not a JSON object, fix it by hand")
+    # Field chưa có thì hiện giá trị mặc định
+    raw = {config.SERVER: {}, "keys": {}} if new else config.load_raw(a.config)
     print(f"{'Creating' if new else 'Editing'} {os.path.abspath(a.config)}. Enter keeps the value in [brackets].")
     values, diff = {}, []
     for f in config.FIELDS:
@@ -166,12 +180,7 @@ def main(argv=None) -> None:
     for name, fn in (("generate", cmd_generate), ("import", cmd_import)):
         p = sub.add_parser(name)
         p.add_argument("--venue", required=True, choices=keystore.VENUES)
-        p.add_argument("--allowed-ip", required=True, action="append")
         p.set_defaults(fn=fn)
-    p = sub.add_parser("set-ips")
-    p.add_argument("key_id")
-    p.add_argument("ip", nargs="+")
-    p.set_defaults(fn=cmd_set_ips)
     for name, fn in (("remove", cmd_remove), ("show", cmd_show), ("rotate-hmac", cmd_rotate_hmac)):
         p = sub.add_parser(name)
         p.add_argument("key_id")

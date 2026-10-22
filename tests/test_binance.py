@@ -1,13 +1,15 @@
 import base64
 import unittest
+from decimal import Decimal
 from urllib.parse import unquote
 
 from Crypto.PublicKey import ECC
 from Crypto.Signature import eddsa
 
 from signer.errors import Reject
+from signer.policy import Rule
 from signer.venues import binance
-from tests.helpers import BN, ED25519_SEED, LIMITS, NOW, bn
+from tests.helpers import BN, ED25519_SEED, MAX_AGE_MS, NOW, RULE_BN, bn
 
 
 class SignatureTest(unittest.TestCase):
@@ -39,13 +41,13 @@ class SignatureTest(unittest.TestCase):
 
 
 class PolicyTest(unittest.TestCase):
-    def ok(self, op, **overrides):
-        binance.verify(op, bn(**{**BN[op], **overrides}), LIMITS, NOW)
+    def ok(self, op, rule=RULE_BN, **overrides):
+        binance.verify(op, bn(**{**BN[op], **overrides}), rule, MAX_AGE_MS, NOW)
 
-    def rejects(self, code, op, payload=None, **overrides):
+    def rejects(self, code, op, payload=None, rule=RULE_BN, **overrides):
         payload = payload if payload is not None else bn(**{**BN[op], **overrides})
         with self.assertRaises(Reject) as cm:
-            binance.verify(op, payload, LIMITS, NOW)
+            binance.verify(op, payload, rule, MAX_AGE_MS, NOW)
         self.assertEqual(cm.exception.code, code, cm.exception.message)
 
     def test_valid_payloads(self):
@@ -77,12 +79,39 @@ class PolicyTest(unittest.TestCase):
     def test_symbol(self):
         self.rejects("SYMBOL_NOT_ALLOWED", "place_order", symbol="ETHUSDT")
         self.rejects("SYMBOL_NOT_ALLOWED", "set_leverage", symbol="btcusdt")
+        self.rejects("SYMBOL_NOT_ALLOWED", "place_order", symbol=None)
+
+    def test_rule_per_key(self):
+        rule = Rule(max_leverage=10, allowed={"BTCUSDC": Decimal("0.01"), "ETHUSDT": Decimal("1")})
+        self.ok("place_order", rule, symbol="ETHUSDT", quantity="0.5")
+        self.ok("place_order", rule, symbol="BTCUSDC")
+        self.rejects("QTY_EXCEEDS_LIMIT", "place_order", rule=rule, symbol="BTCUSDC", quantity="0.5")
+        self.rejects("SYMBOL_NOT_ALLOWED", "place_order", rule=rule)  # BTCUSDT
+        self.rejects("SYMBOL_NOT_ALLOWED", "place_conditional", rule=rule)
+        self.ok("set_leverage", rule, symbol="ETHUSDT", leverage="10")
+        self.rejects("LEVERAGE_EXCEEDS_LIMIT", "set_leverage", rule=rule, symbol="ETHUSDT", leverage="11")
 
     def test_qty(self):
         for q in ("0.01", "0.02", "0", "-0.001", "NaN", "Infinity", "abc", "", None):
             with self.subTest(q=q):
                 self.rejects("QTY_EXCEEDS_LIMIT", "place_order", quantity=q)
         self.ok("place_order", quantity="0.0099")
+
+    def test_reduce_only_qty_unlimited(self):
+        self.ok("place_order", reduceOnly="true", quantity="5")
+        for q in ("0", "-1", "NaN", "abc"):
+            with self.subTest(q=q):
+                self.rejects("QTY_EXCEEDS_LIMIT", "place_order", reduceOnly="true", quantity=q)
+        self.rejects("QTY_EXCEEDS_LIMIT", "place_order", reduceOnly="false", quantity="5")
+
+    def test_fixed_value_params(self):
+        self.ok("place_order", newOrderRespType="RESULT")
+        self.ok("place_conditional", priceProtect="false")
+        self.ok("place_conditional", priceProtect="FALSE")
+        self.rejects("PARAM_NOT_ALLOWED", "place_order", newOrderRespType="ACK")
+        self.rejects("PARAM_NOT_ALLOWED", "place_conditional", priceProtect="true")
+        self.rejects("PARAM_NOT_ALLOWED", "place_conditional", newOrderRespType="RESULT")
+        self.rejects("PARAM_NOT_ALLOWED", "place_order", priceProtect="false")
 
     def test_leverage(self):
         for lev in ("0", "6", "2.5", "3.0", "-1", "NaN", "x", ""):

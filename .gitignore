@@ -11,7 +11,9 @@ venv/
 # Dữ liệu của máy Signer: keystore chứa key (đã mã hoá) và HMAC secret, không đưa lên git
 keystore.json
 *.keystore.json
-!config.example.json
+# config chứa key_id, IP được phép và hạn mức của từng key
+config.ini
+!config.example.ini
 
 # OS
 .DS_Store

@@ -6,21 +6,22 @@ from Crypto.PublicKey import ECC
 from Crypto.Signature import eddsa
 
 from signer import policy
-from signer.config import Limits
 from signer.errors import Reject
+from signer.policy import Rule
 
-SYMBOL = "BTCUSDT"
 DEFAULT_RECV_WINDOW_MS = 5000
 MAX_RECV_WINDOW_MS = 20000  # chữ ký Binance hết hạn tối đa 20 s sau timestamp
 CONDITIONAL_TYPES = ("STOP_MARKET", "TAKE_PROFIT_MARKET")
+# Tham số chỉ được phép với đúng một giá trị
+FIXED_VALUES = {"newOrderRespType": ("RESULT",), "priceProtect": ("false", "FALSE")}
 _DIGITS = re.compile(r"[0-9]{1,19}")
 
 ALLOWED = {
     "place_order": ("symbol", "side", "type", "quantity", "price", "timeInForce", "reduceOnly",
-                    "newClientOrderId", "recvWindow", "timestamp"),
+                    "newClientOrderId", "newOrderRespType", "recvWindow", "timestamp"),
     "cancel_order": ("symbol", "origClientOrderId", "recvWindow", "timestamp"),
     "place_conditional": ("algoType", "symbol", "side", "type", "triggerPrice", "closePosition",
-                          "workingType", "clientAlgoId", "recvWindow", "timestamp"),
+                          "workingType", "priceProtect", "clientAlgoId", "recvWindow", "timestamp"),
     "cancel_conditional": ("symbol", "clientAlgoId", "recvWindow", "timestamp"),
     "set_leverage": ("symbol", "leverage", "recvWindow", "timestamp"),
 }
@@ -60,7 +61,7 @@ def detect_op(params: dict) -> str | None:
     return None
 
 
-def verify(op: str, payload, limits: Limits, now_ms: int) -> None:
+def verify(op: str, payload, rule: Rule, max_age_ms: int, now_ms: int) -> None:
     params = parse(payload)
 
     actual = detect_op(params)
@@ -68,21 +69,29 @@ def verify(op: str, payload, limits: Limits, now_ms: int) -> None:
         raise Reject("OP_MISMATCH", f"payload is {actual or 'unrecognised'}, not {op}")
 
     policy.check_params(op, params, ALLOWED[op])
+    for k, values in FIXED_VALUES.items():
+        if k in params and params[k] not in values:
+            raise Reject("PARAM_NOT_ALLOWED", f"{k} {params[k]!r} must be {' or '.join(values)}")
 
-    if "symbol" in params and params["symbol"] != SYMBOL:
-        raise Reject("SYMBOL_NOT_ALLOWED", f"symbol {params['symbol']!r} is not {SYMBOL}")
+    if "symbol" in params and params["symbol"] not in rule.allowed:
+        raise Reject("SYMBOL_NOT_ALLOWED", f"symbol {params['symbol']!r} is not allowed for this key")
+    if op == "place_order" and "symbol" not in params:
+        # Cần symbol để biết max_qty
+        raise Reject("SYMBOL_NOT_ALLOWED", "symbol is required")
 
     if op == "place_order":
-        policy.check_qty(params.get("quantity"), limits.max_qty_btc)
+        # Lệnh reduce-only chỉ giảm vị thế → không giới hạn khối lượng
+        reduce_only = params.get("reduceOnly") == "true"
+        policy.check_qty(params.get("quantity"), None if reduce_only else rule.allowed[params["symbol"]])
     elif op == "place_conditional":
         if params.get("closePosition") != "true":
             raise Reject("MUST_CLOSE_POSITION", "closePosition must be true")
         if params.get("type") not in CONDITIONAL_TYPES:
             raise Reject("MUST_CLOSE_POSITION", f"type must be one of {', '.join(CONDITIONAL_TYPES)}")
     elif op == "set_leverage":
-        policy.check_leverage(_int(params["leverage"]), limits.max_leverage)
+        policy.check_leverage(_int(params["leverage"]), rule.max_leverage)
 
-    policy.check_fresh("timestamp", _int(params.get("timestamp")), now_ms, limits.max_payload_age_ms)
+    policy.check_fresh("timestamp", _int(params.get("timestamp")), now_ms, max_age_ms)
     # Không gửi recvWindow → sàn dùng mặc định 5000 ms
     rw = _int(params.get("recvWindow", str(DEFAULT_RECV_WINDOW_MS)))
     if type(rw) is not int or not (0 < rw <= MAX_RECV_WINDOW_MS):

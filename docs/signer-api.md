@@ -50,10 +50,10 @@ Chỉ áp dụng cho `/v1/sign`, và đi theo `key_id`: request xin ký bằng k
 
 | Kiểm tra | Lỗi nếu sai |
 |---|---|
-| `key_id` trong body tồn tại | `401 UNAUTHENTICATED` |
-| IP của request nằm trong allowlist của `key_id` đó | `401 UNAUTHENTICATED` |
+| `key_id` trong body tồn tại, và có section `[key:<key_id>]` trong `config.ini` | `401 UNAUTHENTICATED` |
+| IP của request nằm trong `allowed_ips` của section đó | `401 UNAUTHENTICATED` |
 
-Hai trường hợp trả **cùng một lỗi**, để người gọi không dò được key nào đang tồn tại.
+Các trường hợp trả **cùng một lỗi**, để người gọi không dò được key nào đang tồn tại.
 
 ### HMAC
 
@@ -224,9 +224,9 @@ Mỗi thao tác có một danh sách tham số được phép. **Có bất kỳ 
 
 | Thao tác | Binance: tham số được phép | Hyperliquid: field được phép |
 |---|---|---|
-| Đặt lệnh | `symbol`, `side`, `type`, `quantity`, `price`, `timeInForce`, `reduceOnly`, `newClientOrderId`, `recvWindow`, `timestamp` | `action`: `type`, `orders`, `grouping`. Mỗi phần tử trong `orders`: `a`, `b`, `p`, `s`, `r`, `t`, `c` |
+| Đặt lệnh | `symbol`, `side`, `type`, `quantity`, `price`, `timeInForce`, `reduceOnly`, `newClientOrderId`, `newOrderRespType` (chỉ `RESULT`), `recvWindow`, `timestamp` | `action`: `type`, `orders`, `grouping`. Mỗi phần tử trong `orders`: `a`, `b`, `p`, `s`, `r`, `t`, `c` |
 | Huỷ lệnh | `symbol`, `origClientOrderId`, `recvWindow`, `timestamp` | `action`: `type`, `cancels`. Mỗi phần tử: `asset`, `cloid` |
-| Đặt lệnh bảo hiểm | `algoType`, `symbol`, `side`, `type`, `triggerPrice`, `closePosition`, `workingType`, `clientAlgoId`, `recvWindow`, `timestamp` | Giống "Đặt lệnh" |
+| Đặt lệnh bảo hiểm | `algoType`, `symbol`, `side`, `type`, `triggerPrice`, `closePosition`, `workingType`, `priceProtect` (chỉ `false`), `clientAlgoId`, `recvWindow`, `timestamp` | Giống "Đặt lệnh" |
 | Huỷ lệnh bảo hiểm | `symbol`, `clientAlgoId`, `recvWindow`, `timestamp` | Giống "Huỷ lệnh" |
 | Đổi đòn bẩy | `symbol`, `leverage`, `recvWindow`, `timestamp` | `action`: `type`, `asset`, `isCross`, `leverage` |
 
@@ -236,10 +236,10 @@ Với Hyperliquid, ngoài `action` thì `payload` chỉ được có thêm `nonc
 
 | Quy tắc | Binance | Hyperliquid | Lỗi |
 |---|---|---|---|
-| Symbol | `symbol = BTCUSDT` (nếu có tham số `symbol`) | Mọi `a` / `asset` bằng `0` (BTC perp) | `403 SYMBOL_NOT_ALLOWED` |
+| Symbol | `symbol` là một symbol trong section của key (nếu có tham số `symbol`). `place_order` bắt buộc có `symbol` | Mọi `a` / `asset` là chỉ số asset của một symbol trong section của key (tra `<COIN>USDC` trong `signer/hyperliquid_assets.ini`) | `403 SYMBOL_NOT_ALLOWED` |
 | Số lệnh | Một payload là một lệnh (Binance không có batch trong whitelist) | `place_order` và `place_conditional`: mảng `orders` có đúng 1 phần tử | `403 TOO_MANY_ORDERS` |
-| Khối lượng | `0 < quantity < max_qty_btc` | `0 < s < max_qty_btc` | `403 QTY_EXCEEDS_LIMIT` |
-| Đòn bẩy | `1 ≤ leverage ≤ max_leverage` | `1 ≤ leverage ≤ max_leverage`, và `isCross = true` | `403 LEVERAGE_EXCEEDS_LIMIT` |
+| Khối lượng | `0 < quantity < max_qty` của symbol đó. Lệnh `reduceOnly=true`: chỉ cần `quantity > 0` | `0 < s < max_qty` của symbol đó. Lệnh `r = true`: chỉ cần `s > 0`. `place_conditional` (`positionTpsl`): nhận thêm `s = 0` (đóng cả vị thế) | `403 QTY_EXCEEDS_LIMIT` |
+| Đòn bẩy | `1 ≤ leverage ≤ max_leverage` của key | `1 ≤ leverage ≤ max_leverage` của key, và `isCross = true` | `403 LEVERAGE_EXCEEDS_LIMIT` |
 | Lệnh bảo hiểm phải đóng vị thế | `closePosition = true`, `type` là `STOP_MARKET` hoặc `TAKE_PROFIT_MARKET` | Mọi lệnh có `r = true` và `t.trigger` | `403 MUST_CLOSE_POSITION` |
 | Payload còn mới | `timestamp` lệch so với giờ Signer không quá `max_payload_age_ms`; `recvWindow ≤ 20000` | `nonce` lệch so với giờ Signer không quá `max_payload_age_ms` | `403 STALE_PAYLOAD` |
 
@@ -253,11 +253,14 @@ Ngoài các quy tắc trên, Signer không kiểm tra gì thêm.
 
 ### Giới hạn
 
-| Tên | Ý nghĩa | Giá trị |
-|---|---|---|
-| `max_qty_btc` | Khối lượng tối đa của một lệnh (so sánh `<`) | Chưa chốt |
-| `max_leverage` | Đòn bẩy tối đa | Chưa chốt |
-| `max_payload_age_ms` | Độ lệch tối đa của `timestamp` / `nonce` so với giờ Signer | `60000` (1 phút) |
+Giới hạn đi theo từng key, trong section `[key:<key_id>]` của `config.ini`. Key mới (`generate` / `import`) được `max_leverage = 40` và symbol `BTCUSDC` với `max_qty = 0.1` (cùng tên trên Binance lẫn Hyperliquid).
+
+| Tên | Nằm ở | Ý nghĩa | Giá trị |
+|---|---|---|---|
+| `allowed_ips` | `[key:…]` | IP của BE được gọi bằng key này | Theo key |
+| `<symbol> = <max_qty>` | `[key:…]` | Symbol được ký và khối lượng tối đa của một lệnh (so sánh `<`), không áp dụng cho lệnh reduce-only | Theo key |
+| `max_leverage` | `[key:…]` | Đòn bẩy tối đa | Theo key |
+| `max_payload_age_ms` | `[server]` | Độ lệch tối đa của `timestamp` / `nonce` so với giờ Signer | `60000` (1 phút) |
 | `recvWindow` tối đa của Binance | Cố định trong code (`MAX_RECV_WINDOW_MS`), không có trong config | `20000` (20 giây) |
 
 ---
@@ -313,14 +316,14 @@ Khi lỗi, Signer **không bao giờ trả về chữ ký**.
 | HTTP | `error` | Khi nào |
 |---|---|---|
 | 400 | `INVALID_REQUEST` | Body không phải JSON, hoặc `payload` không đọc được |
-| 401 | `UNAUTHENTICATED` | `key_id` không tồn tại, IP không nằm trong allowlist của key, hoặc HMAC sai / thiếu / quá cũ |
+| 401 | `UNAUTHENTICATED` | `key_id` không tồn tại hoặc không có section trong config, IP không nằm trong `allowed_ips` của key, hoặc HMAC sai / thiếu / quá cũ |
 | 403 | `OP_NOT_ALLOWED` | `op` không nằm trong 5 thao tác được phép |
 | 403 | `OP_MISMATCH` | Payload không khớp với `op` đã khai báo |
-| 403 | `PARAM_NOT_ALLOWED` | Có tham số nằm ngoài whitelist |
-| 403 | `SYMBOL_NOT_ALLOWED` | Không phải BTC |
+| 403 | `PARAM_NOT_ALLOWED` | Có tham số nằm ngoài whitelist, hoặc `newOrderRespType` / `priceProtect` có giá trị khác giá trị được phép |
+| 403 | `SYMBOL_NOT_ALLOWED` | Symbol / asset không có trong section của key |
 | 403 | `TOO_MANY_ORDERS` | Mảng `orders` của Hyperliquid không có đúng 1 lệnh |
-| 403 | `QTY_EXCEEDS_LIMIT` | Khối lượng `≤ 0`, `≥ max_qty_btc`, hoặc không đọc được thành số |
-| 403 | `LEVERAGE_EXCEEDS_LIMIT` | Đòn bẩy ngoài khoảng `1…max_leverage`, hoặc không phải cross |
+| 403 | `QTY_EXCEEDS_LIMIT` | Khối lượng `≤ 0` (`< 0` với lệnh `positionTpsl`), `≥ max_qty` của symbol (trừ lệnh reduce-only), hoặc không đọc được thành số |
+| 403 | `LEVERAGE_EXCEEDS_LIMIT` | Đòn bẩy ngoài khoảng `1…max_leverage` của key, hoặc không phải cross |
 | 403 | `MUST_CLOSE_POSITION` | Lệnh bảo hiểm không phải lệnh đóng vị thế |
 | 403 | `STALE_PAYLOAD` | `timestamp` / `nonce` quá cũ hoặc ở tương lai, hoặc `recvWindow` quá lớn |
 | 503 | `KEY_NOT_LOADED` | Key tồn tại nhưng hiện chưa dùng được để ký (bản ghi lỗi, hoặc chưa có HMAC secret) |
@@ -338,4 +341,4 @@ Các lỗi `403` từ `OP_NOT_ALLOWED` trở xuống trong bảng là dấu hi�
 - [ ] **Hyperliquid `positionTpsl`:** thử trên testnet xem `s` có tự co giãn theo khối lượng vị thế không.
 - [ ] **Giới hạn giá:** Signer không có giá thị trường nên không chặn được lệnh đặt giá vô lý.
   - Có thể thêm giới hạn `qty × price < max_notional_usd`.
-  - Hoặc chấp nhận rằng `max_qty_btc` đã đủ để giới hạn thiệt hại.
+  - Hoặc chấp nhận rằng `max_qty` theo symbol đã đủ để giới hạn thiệt hại.

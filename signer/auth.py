@@ -18,9 +18,12 @@ def compute_signature(hmac_key: bytes, timestamp: str, body: bytes) -> str:
     return hmac.new(hmac_key, message, hashlib.sha256).hexdigest()
 
 
-def authenticate(keys: dict[str, Key], key_id, client_ip: str, headers, body: bytes,
+def authenticate(keys: dict[str, Key], rules: dict, key_id, client_ip: str, headers, body: bytes,
                  now_ms: int, max_age_ms: int) -> Key:
-    """IP allowlist(key_id) → HMAC của key đó trên (timestamp, body) → timestamp còn mới."""
+    """IP allowlist(key_id) trong config → HMAC của key đó trên (timestamp, body) → timestamp còn mới.
+
+    rules: key_id → config.KeyRule; key không có section [key:…] thì không được gọi từ IP nào.
+    """
     def fail(detail: str) -> Reject:
         # Mọi lý do trả cùng một lỗi, để không dò được key nào tồn tại; lý do thật chỉ ghi log
         return Reject("UNAUTHENTICATED", "unauthenticated", detail)
@@ -28,7 +31,10 @@ def authenticate(keys: dict[str, Key], key_id, client_ip: str, headers, body: by
     key = keys.get(key_id) if isinstance(key_id, str) else None
     if key is None:
         raise fail("unknown key_id")
-    if client_ip not in key.allowed_ips:
+    rule = rules.get(key_id)
+    if rule is None:
+        raise fail("key has no config section")
+    if client_ip not in rule.allowed_ips:
         raise fail("ip not allowed")
     if key.hmac_key is None:
         raise Reject("KEY_NOT_LOADED", "key is not loaded", "key has no HMAC secret: run rotate-hmac")

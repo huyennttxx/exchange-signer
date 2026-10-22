@@ -1,13 +1,13 @@
 @echo off
 rem Menu quan ly Signer (signer\menu.py), ban Windows cua signer.sh.
 rem Co tham so thi chay thang lenh signer.admin, vi du: signer.bat list
-rem Duong dan tinh tu thu muc chua file nay. Config khac: set SIGNER_CONFIG=D:\signer\config.json
+rem Duong dan tinh tu thu muc chua file nay. Config khac: set SIGNER_CONFIG=D:\signer\config.ini
 rem Python: SIGNER_PYTHON neu co, roi .venv, roi python
 setlocal
 cd /d "%~dp0"
 
 if defined SIGNER_PYTHON (set "PY=%SIGNER_PYTHON%") else if exist ".venv\Scripts\python.exe" (set "PY=.venv\Scripts\python.exe") else (set "PY=python")
-if not defined SIGNER_CONFIG set "SIGNER_CONFIG=config.json"
+if not defined SIGNER_CONFIG set "SIGNER_CONFIG=config.ini"
 
 "%PY%" -m signer.menu --config "%SIGNER_CONFIG%" %*
 exit /b %ERRORLEVEL%

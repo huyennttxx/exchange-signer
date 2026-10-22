@@ -8,6 +8,7 @@ import signal
 import sys
 import threading
 import time
+from dataclasses import dataclass, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from signer import config as config_mod
@@ -52,30 +53,76 @@ def parse_body(body: bytes) -> dict:
     return req
 
 
+def build_rules(keys: dict[str, keystore.Key], cfg: config_mod.Config) -> tuple[dict, list[str], list[str]]:
+    """key_id → policy.Rule cho mọi key có trong cả keystore lẫn config.
+
+    Trả (rules, errors, warnings). Key có lỗi (symbol Hyperliquid không có trong bảng asset) không có rule.
+    """
+    rules, errors, warnings = {}, [], []
+    for key_id, key in keys.items():
+        if key_id not in cfg.keys:
+            warnings.append(f"key {key_id} has no [key:{key_id}] section in config: requests will be rejected")
+            continue
+        if not cfg.keys[key_id].allowed_ips:
+            warnings.append(f"[key:{key_id}] has no allowed_ips yet: fill them in the config")
+        try:
+            rules[key_id] = config_mod.resolve(cfg.keys[key_id], key.venue, cfg.hyperliquid_mainnet)
+        except ValueError as e:
+            errors.append(f"[key:{key_id}]: {e}")
+    for key_id in sorted(cfg.keys.keys() - keys.keys()):
+        warnings.append(f"config section [key:{key_id}] has no key in the keystore")
+    return rules, errors, warnings
+
+
+@dataclass(frozen=True)
+class State:
+    keys: dict  # key_id → keystore.Key
+    cfg: config_mod.Config
+    rules: dict  # key_id → policy.Rule
+    errors: list  # lỗi cấu hình của các key không có rule (đã ghi log)
+
+
 class Signer:
-    def __init__(self, keys: dict[str, keystore.Key], limits: config_mod.Limits, hyperliquid_mainnet: bool,
-                 clock=lambda: int(time.time() * 1000)):
-        self.keys = keys
-        self.limits = limits
-        self.hyperliquid_mainnet = hyperliquid_mainnet
+    def __init__(self, keys: dict[str, keystore.Key], cfg: config_mod.Config, clock=lambda: int(time.time() * 1000)):
         self.clock = clock
+        self.set_state(keys, cfg)
+
+    def set_state(self, keys: dict[str, keystore.Key], cfg: config_mod.Config) -> None:
+        """Thay bộ key và config."""
+        rules, errors, warnings = build_rules(keys, cfg)
+        for w in warnings:
+            log.warning(w)
+        for e in errors:
+            log.error("%s: requests for this key will be rejected", e)
+        # Gán một tham chiếu: request đang chạy thấy bộ cũ hoặc bộ mới, không lẫn
+        self.state = State(keys, cfg, rules, errors)
+
+    @property
+    def keys(self) -> dict[str, keystore.Key]:
+        return self.state.keys
 
     def sign(self, body: bytes, client_ip: str, headers) -> dict:
         """IP allowlist + HMAC(key_id) → venue của key → parse payload → khớp op → whitelist → rủi ro → ký."""
+        st = self.state
         req = parse_body(body)
         now_ms = self.clock()
-        key = authenticate(self.keys, req["key_id"], client_ip, headers, body, now_ms, self.limits.max_payload_age_ms)
+        max_age = st.cfg.max_payload_age_ms
+        key = authenticate(st.keys, st.cfg.keys, req["key_id"], client_ip, headers, body, now_ms, max_age)
         op, payload = req["op"], req["payload"]
         policy.check_op(op)
         if key.secret is None:
             raise Reject("KEY_NOT_LOADED", "key is not loaded")
+        rule = st.rules.get(key.key_id)
+        if rule is None:
+            raise Reject("SYMBOL_NOT_ALLOWED", "key symbols are misconfigured", "see the signer log")
 
         # key.secret có giá trị → venue đã được keystore.unlock kiểm tra
         if key.venue == "binance":
-            binance.verify(op, payload, self.limits, now_ms)
+            binance.verify(op, payload, rule, max_age, now_ms)
             return {"signature": binance.sign(key.secret, payload)}
-        hyperliquid.verify(op, payload, self.limits, now_ms)
-        return {"signature": hyperliquid.sign(key.secret, payload["action"], payload["nonce"], self.hyperliquid_mainnet)}
+        hyperliquid.verify(op, payload, rule, max_age, now_ms)
+        return {"signature": hyperliquid.sign(key.secret, payload["action"], payload["nonce"],
+                                              st.cfg.hyperliquid_mainnet)}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -155,40 +202,50 @@ def make_server(signer: Signer, host: str, port: int) -> ThreadingHTTPServer:
     return server
 
 
-class KeyReloader:
-    """Nạp lại keystore khi file thay đổi, để thêm / sửa / xoá key không cần restart.
+def _digest(path: str) -> bytes:
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).digest()
 
-    Giữ master key trong bộ nhớ để giải mã bản ghi mới. Nạp lỗi thì giữ nguyên bộ key đang dùng.
+
+class KeyReloader:
+    """Nạp lại keystore và các section [key:…] của config khi file thay đổi, để thêm / xoá key, đổi IP
+    hay symbol không cần restart. Field [server] chỉ áp dụng khi restart.
+
+    Giữ master key trong bộ nhớ để giải mã bản ghi mới. Nạp lỗi thì giữ nguyên bộ đang dùng.
     """
 
-    def __init__(self, path: str, master: bytes, signer: Signer):
+    def __init__(self, path: str, config_path: str, master: bytes, signer: Signer):
         self.path = path
+        self.config_path = config_path
         self.master = master
         self.signer = signer
         self.lock = threading.Lock()
-        with open(path, "rb") as f:
-            self.digest = hashlib.sha256(f.read()).digest()
+        self.digest = (_digest(path), _digest(config_path))
 
     def reload_if_changed(self) -> bool:
         with self.lock:
             try:
                 with open(self.path, "rb") as f:
                     raw = f.read()
-                digest = hashlib.sha256(raw).digest()
+                digest = (hashlib.sha256(raw).digest(), _digest(self.config_path))
                 if digest == self.digest:
                     return False
                 data = json.loads(raw)
                 keystore.check_master(data, self.master)
                 keys = keystore.unlock(data, self.master)
+                new_cfg = config_mod.load(self.config_path)
             except keystore.BadPassphrase:
                 self.digest = digest  # chỉ báo lỗi một lần cho mỗi phiên bản file
                 log.error("keystore passphrase changed: keeping current keys, restart the signer to load new ones")
                 return False
             except (OSError, ValueError, KeyError, TypeError) as e:
-                log.error("keystore reload failed, keeping current keys: %s", e)
+                log.error("keystore / config reload failed, keeping current keys: %s", e)
                 return False
-            old = self.signer.keys
-            self.signer.keys = keys  # gán một tham chiếu: request đang chạy vẫn thấy bộ key cũ hoặc mới, không lẫn
+            old, old_cfg = self.signer.keys, self.signer.state.cfg
+            cfg = replace(old_cfg, keys=new_cfg.keys)  # [server] giữ nguyên tới khi restart
+            if cfg != new_cfg:
+                log.warning("[server] in %s changed: restart the signer to apply", self.config_path)
+            self.signer.set_state(keys, cfg)
             self.digest = digest
             added, removed = keys.keys() - old.keys(), old.keys() - keys.keys()
             log.info("keystore reloaded: %d/%d keys loaded, added=%s removed=%s",
@@ -223,9 +280,13 @@ def main(argv=None) -> int:
     disable_core_dumps()
 
     if not os.path.exists(args.config):
-        log.error("%s not found: run ./signer.sh (Config), or copy config.example.json", args.config)
+        log.error("%s not found: run ./signer.sh (Config), or copy config.example.ini", args.config)
         return 1
-    cfg = config_mod.load(args.config)
+    try:
+        cfg = config_mod.load(args.config)
+    except ValueError as e:
+        log.error("%s: %s", args.config, e)
+        return 1
     data = keystore.load(cfg.keystore)
     try:
         master = keystore.open_master(data, read_passphrase())
@@ -236,10 +297,13 @@ def main(argv=None) -> int:
     loaded = sum(k.secret is not None for k in keys.values())
     log.info("loaded %d/%d keys", loaded, len(keys))
 
-    signer = Signer(keys, cfg.limits, cfg.hyperliquid_mainnet)
+    signer = Signer(keys, cfg)
+    if signer.state.errors:
+        log.error("fix the [key:...] sections in %s, then start again", args.config)
+        return 1
     if hasattr(signal, "SIGHUP"):
-        # kill -HUP <pid>: nạp lại keystore. Không có SIGHUP (Windows) thì phải restart
-        reloader = KeyReloader(cfg.keystore, master, signer)
+        # kill -HUP <pid>: nạp lại keystore và section [key:…]. Không có SIGHUP (Windows) thì phải restart
+        reloader = KeyReloader(cfg.keystore, args.config, master, signer)
         signal.signal(signal.SIGHUP,
                       lambda *_: threading.Thread(target=reloader.reload_if_changed, daemon=True).start())
 

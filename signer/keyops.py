@@ -1,5 +1,4 @@
 """Thao tác trên keystore cho admin CLI. Không in, không hỏi passphrase."""
-import ipaddress
 import os
 import secrets
 import uuid
@@ -27,16 +26,6 @@ def _check_new_passphrase(passphrase: bytes) -> None:
         raise KeyOpError(f"passphrase must be at least {MIN_PASSPHRASE} characters")
 
 
-def normalize_ips(ips) -> list[str]:
-    if not isinstance(ips, list) or not ips:
-        raise KeyOpError("at least one allowed IP is required")
-    try:
-        # Chuẩn hoá để so khớp đúng với client_address của server
-        return sorted({str(ipaddress.ip_address(str(ip).strip())) for ip in ips})
-    except ValueError as e:
-        raise KeyOpError(str(e))
-
-
 def exists(path: str) -> bool:
     return os.path.exists(path)
 
@@ -44,8 +33,7 @@ def exists(path: str) -> bool:
 def list_keys(path: str) -> list[dict]:
     if not exists(path):
         raise NotFound(f"{path} not found")
-    return [{"key_id": r["key_id"], "venue": r["venue"], "allowed_ips": r["allowed_ips"], "hmac": "hmac" in r}
-            for r in keystore.load(path)["keys"]]
+    return [{"key_id": r["key_id"], "venue": r["venue"], "hmac": "hmac" in r} for r in keystore.load(path)["keys"]]
 
 
 def create(path: str, passphrase: bytes) -> tuple[dict, bytes]:
@@ -90,34 +78,23 @@ def new_hmac_secret() -> str:
     return secrets.token_hex(32)
 
 
-def add(path: str, passphrase: bytes, venue: str, ips, secret: bytes | None = None) -> dict:
-    """Thêm key; secret = None → sinh mới. Keystore chưa có thì tạo (caller phải xác nhận passphrase mới)."""
+def add(path: str, passphrase: bytes, venue: str, secret: bytes | None = None) -> dict:
+    """Thêm key; secret = None → sinh mới. Keystore chưa có thì tạo (caller phải xác nhận passphrase mới).
+
+    IP được phép không nằm trong keystore mà trong section [key:…] của config.
+    """
     if venue not in keystore.VENUES:
         raise KeyOpError(f"venue must be one of {', '.join(keystore.VENUES)}")
-    ips = normalize_ips(ips)
     if secret is None:
         secret = new_secret(venue)
     elif len(secret) != 32:
         raise KeyOpError("private key must be 32 bytes")
     data, master = unlock_file(path, passphrase) if exists(path) else create(path, passphrase)
-    rec = keystore.seal(master, {"key_id": str(uuid.uuid4()), "venue": venue, "allowed_ips": ips}, secret)
+    rec = keystore.seal(master, {"key_id": str(uuid.uuid4()), "venue": venue}, secret)
     hmac_secret = new_hmac_secret()
     data["keys"].append(keystore.seal_hmac(master, rec, hmac_secret.encode()))
     keystore.save_atomic(path, data)
-    return {"key_id": rec["key_id"], "venue": venue, "allowed_ips": ips,
-            "public": public_info(venue, secret), "hmac_secret": hmac_secret}
-
-
-def set_ips(path: str, passphrase: bytes, key_id: str, ips) -> dict:
-    ips = normalize_ips(ips)
-    data, master = unlock_file(path, passphrase)
-    i = _find(data, key_id)
-    rec = data["keys"][i]
-    # allowed_ips nằm trong AAD → phải mã hoá lại
-    secret = keystore.unseal(master, rec)
-    data["keys"][i] = keystore.seal(master, {**rec, "allowed_ips": ips}, secret)
-    keystore.save_atomic(path, data)
-    return {"key_id": key_id, "venue": rec["venue"], "allowed_ips": ips}
+    return {"key_id": rec["key_id"], "venue": venue, "public": public_info(venue, secret), "hmac_secret": hmac_secret}
 
 
 def rotate_hmac(path: str, passphrase: bytes, key_id: str) -> str:

@@ -1,11 +1,13 @@
 import copy
 import unittest
+from decimal import Decimal
 
 from coincurve import PublicKey
 
 from signer.errors import Reject
+from signer.policy import Rule
 from signer.venues import hyperliquid
-from tests.helpers import LIMITS, NOW, SECP256K1_KEY, hl
+from tests.helpers import MAX_AGE_MS, NOW, RULE_HL, SECP256K1_KEY, hl
 
 try:
     from eth_account import Account
@@ -61,9 +63,9 @@ class SignatureTest(unittest.TestCase):
 
 
 class PolicyTest(unittest.TestCase):
-    def rejects(self, code, op, payload):
+    def rejects(self, code, op, payload, rule=RULE_HL):
         with self.assertRaises(Reject) as cm:
-            hyperliquid.verify(op, payload, LIMITS, NOW)
+            hyperliquid.verify(op, payload, rule, MAX_AGE_MS, NOW)
         self.assertEqual(cm.exception.code, code, cm.exception.message)
 
     def with_order(self, op, **fields):
@@ -74,7 +76,7 @@ class PolicyTest(unittest.TestCase):
     def test_valid_payloads(self):
         for op in OPS:
             with self.subTest(op=op):
-                hyperliquid.verify(op, hl(op), LIMITS, NOW)
+                hyperliquid.verify(op, hl(op), RULE_HL, MAX_AGE_MS, NOW)
 
     def test_op_mismatch(self):
         self.rejects("OP_MISMATCH", "set_leverage", hl("place_order"))
@@ -130,6 +132,18 @@ class PolicyTest(unittest.TestCase):
         p["action"]["asset"] = False
         self.rejects("SYMBOL_NOT_ALLOWED", "set_leverage", p)
 
+    def test_rule_per_key(self):
+        rule = Rule(max_leverage=10, allowed={1: Decimal("1")})  # chỉ ETH
+        hyperliquid.verify("place_order", self.with_order("place_order", a=1, s="0.5"), rule, MAX_AGE_MS, NOW)
+        self.rejects("QTY_EXCEEDS_LIMIT", "place_order", self.with_order("place_order", a=1, s="1"), rule)
+        self.rejects("SYMBOL_NOT_ALLOWED", "place_order", hl("place_order"), rule)
+        self.rejects("SYMBOL_NOT_ALLOWED", "cancel_order", hl("cancel_order"), rule)
+        p = hl("set_leverage")
+        p["action"].update(asset=1, leverage=10)
+        hyperliquid.verify("set_leverage", p, rule, MAX_AGE_MS, NOW)
+        p["action"]["leverage"] = 11
+        self.rejects("LEVERAGE_EXCEEDS_LIMIT", "set_leverage", p, rule)
+
     def test_too_many_orders(self):
         for op in ("place_order", "place_conditional"):
             p = hl(op)
@@ -142,7 +156,20 @@ class PolicyTest(unittest.TestCase):
         for s in ("0.01", "0", "-1", "NaN", "Infinity", True, None, [], "x"):
             with self.subTest(s=s):
                 self.rejects("QTY_EXCEEDS_LIMIT", "place_order", self.with_order("place_order", s=s))
-        hyperliquid.verify("place_order", self.with_order("place_order", s="0.0099"), LIMITS, NOW)
+        hyperliquid.verify("place_order", self.with_order("place_order", s="0.0099"), RULE_HL, MAX_AGE_MS, NOW)
+
+    def test_reduce_only_qty_unlimited(self):
+        hyperliquid.verify("place_order", self.with_order("place_order", r=True, s="5"), RULE_HL, MAX_AGE_MS, NOW)
+        hyperliquid.verify("place_conditional", self.with_order("place_conditional", s="5"), RULE_HL, MAX_AGE_MS, NOW)
+        for s in ("0", "-1", "NaN", None):
+            with self.subTest(s=s):
+                self.rejects("QTY_EXCEEDS_LIMIT", "place_order", self.with_order("place_order", r=True, s=s))
+
+    def test_position_tpsl_zero_size(self):
+        hyperliquid.verify("place_conditional", self.with_order("place_conditional", s="0"), RULE_HL, MAX_AGE_MS, NOW)
+        for s in ("-1", "NaN", None):
+            with self.subTest(s=s):
+                self.rejects("QTY_EXCEEDS_LIMIT", "place_conditional", self.with_order("place_conditional", s=s))
 
     def test_leverage(self):
         for fields in ({"leverage": 6}, {"leverage": 0}, {"leverage": True}, {"leverage": 3.0},
