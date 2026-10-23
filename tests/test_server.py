@@ -1,13 +1,16 @@
 import http.client
 import json
+import socket
+import socketserver
 import threading
 import unittest
+from unittest import mock
 from urllib.parse import unquote
 
 from signer import config
 from signer.auth import SIGNATURE_HEADER, TIMESTAMP_HEADER, compute_signature
 from signer.keystore import Key
-from signer.server import Signer, build_rules, make_server
+from signer.server import Handler, Signer, build_rules, make_server
 from tests.helpers import BN, ED25519_SEED, MAX_AGE_MS, NOW, SECP256K1_KEY, bn, hl
 
 BINANCE_ID = "3f2b8c1e-6d4a-4f7b-9c2e-1a5d8e7f0b34"
@@ -99,6 +102,19 @@ class ServerTest(unittest.TestCase):
 
     def test_health(self):
         self.assertEqual(self.request("GET", "/health"), (200, "application/json", {"status": "ok", "time_ms": NOW}))
+
+    def test_tcp_nodelay(self):
+        # Response đi thành hai lần ghi (header, body); có Nagle thì body chờ delayed ACK của client
+        seen = []
+
+        def setup(handler):
+            socketserver.StreamRequestHandler.setup(handler)
+            seen.append(handler.connection.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY))
+
+        with mock.patch.object(Handler, "setup", setup):
+            self.assertEqual(self.request("GET", "/health")[0], 200)
+        self.assertEqual(len(seen), 1)
+        self.assertTrue(seen[0])
 
     def test_other_paths_404(self):
         for method, path in (("GET", "/"), ("GET", "/v1/sign"), ("POST", "/health"), ("POST", "/v1/sign/"),

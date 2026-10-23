@@ -129,6 +129,8 @@ class Handler(BaseHTTPRequestHandler):
     signer: Signer  # gán khi tạo server
     timeout = SOCKET_TIMEOUT_S
     protocol_version = "HTTP/1.1"  # giữ kết nối giữa các request
+    # Header và body đi thành hai lần ghi; có Nagle thì body chờ delayed ACK của client (~40 ms trở lên)
+    disable_nagle_algorithm = True
     server_version = "signer"
     sys_version = ""
 
