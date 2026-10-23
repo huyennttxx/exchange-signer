@@ -7,17 +7,21 @@ Dịch vụ ký lệnh cho Binance USDⓈ-M Futures và Hyperliquid. BE gửi pa
 ## Bắt đầu trên máy mới
 
 ```bash
-pip install -r requirements.txt
+bash install.sh                      # Windows: install.bat
 cp config.example.ini config.ini     # rồi xoá các section [key:…] mẫu, sửa [server]
 ./signer.sh                          # menu: 2 → thêm key (chỉ hỏi sàn)
 ```
+
+`install.sh` / `install.bat` tìm Python ≥ 3.10, tạo `.venv` trong thư mục dự án và cài `requirements.txt` vào đó (`signer.sh` / `start.sh` tự dùng `.venv`). Chạy lại bao nhiêu lần cũng được; thêm `--dev` để cài cả gói test.
+- macOS: chưa có Python phù hợp thì `install.sh` cài `python@3.12` bằng Homebrew; máy chưa có Homebrew thì hỏi trước khi cài.
+- Linux / Windows: script không tự cài Python, chỉ báo cách cài (`sudo apt install python3 python3-venv`, `winget install Python.Python.3.12`).
 
 1. Thêm key bằng menu (hoặc `./signer.sh generate --venue binance`). Lần đầu tự tạo keystore, hỏi passphrase mới 2 lần.
 2. Ghi lại những gì được in ra **một lần**: public key Ed25519 (Binance) hoặc địa chỉ agent (Hyperliquid) để đăng ký trên sàn, và **HMAC secret** để đưa cho BE.
 3. Mở `config.ini`, điền `allowed_ips` trong section `[key:<key_id>]` vừa được thêm; sửa symbol / hạn mức nếu cần.
 4. Chạy Signer: `./start.sh`.
 
-Trên Windows dùng `signer.bat` và `start.bat` thay cho hai file `.sh`. Trên Linux chạy `chmod +x signer.sh start.sh` một lần.
+Trên Windows dùng `signer.bat` và `start.bat` thay cho hai file `.sh`. `install.sh` tự `chmod +x` các script `.sh`.
 
 ## Config (`config.ini`)
 

@@ -128,6 +128,7 @@ class Signer:
 class Handler(BaseHTTPRequestHandler):
     signer: Signer  # gán khi tạo server
     timeout = SOCKET_TIMEOUT_S
+    protocol_version = "HTTP/1.1"  # giữ kết nối giữa các request
     server_version = "signer"
     sys_version = ""
 
