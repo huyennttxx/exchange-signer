@@ -24,6 +24,9 @@ ALLOWED_LEVERAGE_ACTION = ("type", "asset", "isCross", "leverage")
 ALLOWED_SUB_TRANSFER_ACTION = ("type", "subAccountUser", "isDeposit", "usd")
 ALLOWED_SUB_SPOT_TRANSFER_ACTION = ("type", "subAccountUser", "isDeposit", "token", "amount")
 MAX_UINT64 = 2**64 - 1
+# Gửi / rút USDC Earn (money market của HyperCore). Không ký borrow / repay
+ALLOWED_EARN_ACTION = ("type", "operation", "token", "amount")
+EARN_OPERATIONS = ("supply", "withdraw")
 
 _ADDRESS_RE = re.compile(r"0x[0-9a-fA-F]{40}")
 _TOKEN_RE = re.compile(r"[A-Za-z0-9]+:0x[0-9a-fA-F]{32}")  # <tên>:<token id>, ví dụ USDC:0x6d1e…
@@ -78,6 +81,8 @@ def detect_op(action: dict) -> tuple[str, ...]:
         return ("set_leverage",)
     if t in ("subAccountTransfer", "subAccountSpotTransfer"):
         return ("sub_account_transfer",)
+    if t == "borrowLend":
+        return ("earn_transfer",)
     return ()
 
 
@@ -129,6 +134,25 @@ def _check_sub_account_transfer(action: dict) -> None:
             raise Reject("QTY_EXCEEDS_LIMIT", f"usd {usd!r} must be an integer > 0 (units of 1e-6 USDC)")
 
 
+def _check_earn(action: dict) -> None:
+    """borrowLend chỉ với supply / withdraw, mọi token; amount = null nghĩa là toàn bộ."""
+    policy.check_params("action", action, ALLOWED_EARN_ACTION)
+    operation = action.get("operation")
+    if operation not in EARN_OPERATIONS:  # borrow, repay: không ký
+        raise Reject("PARAM_NOT_ALLOWED", f"operation {operation!r} must be one of {', '.join(EARN_OPERATIONS)}")
+    token = action.get("token")
+    # Chỉ số token của sàn (0 = USDC); không giới hạn token nào
+    if type(token) is not int or not 0 <= token <= MAX_UINT64:
+        raise Reject("INVALID_REQUEST", f"token {token!r} must be an integer >= 0 (token index, 0 = USDC)")
+    if "amount" not in action:
+        raise Reject("INVALID_REQUEST", "amount is required (decimal string, or null for all)")
+    amount = action["amount"]
+    if amount is not None:
+        if not isinstance(amount, str):
+            raise Reject("QTY_EXCEEDS_LIMIT", f"amount {amount!r} must be a decimal string or null")
+        policy.check_qty(amount, None)
+
+
 def verify(op: str, payload, rule: Rule, max_age_ms: int, now_ms: int) -> None:
     payload = _obj("payload", payload)
     action = _obj("payload.action", payload.get("action"))
@@ -167,6 +191,8 @@ def verify(op: str, payload, rule: Rule, max_age_ms: int, now_ms: int) -> None:
         # Chuyển tiền ký bằng tài khoản master; vaultAddress không có nghĩa ở đây
         if payload.get("vaultAddress") is not None:
             raise Reject("PARAM_NOT_ALLOWED", "vaultAddress is not allowed for sub_account_transfer")
+    elif op == "earn_transfer":
+        _check_earn(action)
     else:
         policy.check_params("action", action, ALLOWED_LEVERAGE_ACTION)
         policy.check_asset(action.get("asset"), rule.allowed)

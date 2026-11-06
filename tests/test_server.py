@@ -148,6 +148,20 @@ class ServerTest(unittest.TestCase):
                 self.assertEqual(status, 200, body)
                 self.assertEqual(body["signature"], hyperliquid.sign(SECP256K1_KEY, p["action"], NOW, True))
 
+    def test_hyperliquid_earn_transfer(self):
+        from signer.venues import hyperliquid
+        for operation, amount in (("supply", "100"), ("withdraw", None)):
+            with self.subTest(operation=operation):
+                p = hl("earn_transfer")
+                p["action"].update(operation=operation, amount=amount)
+                status, _, body = self.sign(HL_ID, "earn_transfer", p)
+                self.assertEqual(status, 200, body)
+                self.assertEqual(body["signature"], hyperliquid.sign(SECP256K1_KEY, p["action"], NOW, True))
+        p = hl("earn_transfer")
+        p["action"]["operation"] = "borrow"
+        status, _, body = self.sign(HL_ID, "earn_transfer", p)
+        self.assertEqual((status, body["error"]), (403, "PARAM_NOT_ALLOWED"))
+
     def test_binance_sub_account_transfer_not_supported(self):
         status, _, body = self.sign(BINANCE_ID, "sub_account_transfer", bn(**BN["place_order"]))
         self.assertEqual((status, body["error"]), (403, "OP_MISMATCH"))

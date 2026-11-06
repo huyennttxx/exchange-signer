@@ -16,7 +16,7 @@ except ImportError:  # SDK chỉ cài trong môi trường test
     sign_l1_action = None
 
 TRADE_OPS = ("place_order", "cancel_order", "place_conditional", "cancel_conditional", "set_leverage")
-OPS = TRADE_OPS + ("sub_account_transfer",)
+OPS = TRADE_OPS + ("sub_account_transfer", "earn_transfer")
 # Mẫu payload của helpers.hl: mọi op, thêm bản spot của sub_account_transfer
 SAMPLES = OPS + ("sub_account_spot_transfer",)
 
@@ -331,6 +331,82 @@ class SubAccountTransferTest(unittest.TestCase):
         p["nonce"] = NOW - 10_001
         self.rejects("STALE_PAYLOAD", None, p)
 
+
+
+class EarnTransferTest(unittest.TestCase):
+    OP = "earn_transfer"
+
+    def ok(self, **fields):
+        p = hl(self.OP)
+        p["action"].update(fields)
+        hyperliquid.verify(self.OP, p, RULE_HL, MAX_AGE_MS, NOW)
+
+    def rejects(self, code, payload=None, **fields):
+        p = payload or hl(self.OP)
+        p["action"].update(fields)
+        with self.assertRaises(Reject) as cm:
+            hyperliquid.verify(self.OP, p, RULE_HL, MAX_AGE_MS, NOW)
+        self.assertEqual(cm.exception.code, code, cm.exception.message)
+
+    def test_supply_and_withdraw(self):
+        for operation in ("supply", "withdraw"):
+            for amount in ("100", "0.000001", None):
+                with self.subTest(operation=operation, amount=amount):
+                    self.ok(operation=operation, amount=amount)
+
+    def test_any_token(self):
+        # Mọi token, không phụ thuộc symbol của key
+        rule = Rule(max_leverage=1, allowed={1: Decimal("1")})
+        for token in (0, 150, 197, 268, 360, 2**64 - 1):
+            with self.subTest(token=token):
+                p = hl(self.OP)
+                p["action"]["token"] = token
+                hyperliquid.verify(self.OP, p, rule, MAX_AGE_MS, NOW)
+        for token in (-1, 2**64, True, False, "0", 0.0, None):
+            with self.subTest(token=token):
+                self.rejects("INVALID_REQUEST", token=token)
+
+    def test_borrow_and_repay_not_signed(self):
+        for operation in ("borrow", "repay", "Supply", "", None, 0):
+            with self.subTest(operation=operation):
+                self.rejects("PARAM_NOT_ALLOWED", operation=operation)
+
+    def test_amount(self):
+        for amount in ("0", "-1", "NaN", "Infinity", "x", "", 1, 1.5, True, [], {}):
+            with self.subTest(amount=amount):
+                self.rejects("QTY_EXCEEDS_LIMIT", amount=amount)
+        p = hl(self.OP)
+        del p["action"]["amount"]
+        self.rejects("INVALID_REQUEST", p)
+
+    def test_param_not_allowed(self):
+        self.rejects("PARAM_NOT_ALLOWED", user="0x" + "11" * 20)
+        p = hl(self.OP)
+        p["expiresAfter"] = NOW
+        self.rejects("PARAM_NOT_ALLOWED", p)
+
+    def test_op_mismatch(self):
+        for op in TRADE_OPS + ("sub_account_transfer",):
+            with self.subTest(op=op):
+                with self.assertRaises(Reject) as cm:
+                    hyperliquid.verify(op, hl(self.OP), RULE_HL, MAX_AGE_MS, NOW)
+                self.assertEqual(cm.exception.code, "OP_MISMATCH")
+        p = {"action": {"type": "vaultTransfer"}, "nonce": NOW}
+        with self.assertRaises(Reject) as cm:
+            hyperliquid.verify(self.OP, p, RULE_HL, MAX_AGE_MS, NOW)
+        self.assertEqual(cm.exception.code, "OP_MISMATCH")
+
+    def test_vault_address(self):
+        p = hl(self.OP)
+        p["vaultAddress"] = "0x" + "ab" * 20
+        hyperliquid.verify(self.OP, p, RULE_HL, MAX_AGE_MS, NOW)
+        p["vaultAddress"] = "0xab"
+        self.rejects("INVALID_REQUEST", p)
+
+    def test_stale(self):
+        p = hl(self.OP)
+        p["nonce"] = NOW + 10_001
+        self.rejects("STALE_PAYLOAD", p)
 
 if __name__ == "__main__":
     unittest.main()

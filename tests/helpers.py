@@ -49,6 +49,8 @@ def hl(op: str) -> dict:
     elif op == "sub_account_spot_transfer":  # cùng op sub_account_transfer, action spot
         action = {"type": "subAccountSpotTransfer", "subAccountUser": SUB_ACCOUNT, "isDeposit": False,
                   "token": USDC_TOKEN, "amount": "12.5"}
+    elif op == "earn_transfer":
+        action = {"type": "borrowLend", "operation": "supply", "token": 0, "amount": "100"}
     elif op in ("cancel_order", "cancel_conditional"):
         action = {"type": "cancelByCloid", "cancels": [{"asset": 0, "cloid": CLOID}]}
     else:
