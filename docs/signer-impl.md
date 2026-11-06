@@ -357,7 +357,7 @@ def check_asset(a, allowed) -> None:
 - Dùng `unittest` của thư viện chuẩn. Môi trường test được cài thêm `hyperliquid-python-sdk` để lấy chữ ký đối chiếu; máy Signer thì không.
 - **Chữ ký:** so với test vector có sẵn.
   - Binance: ví dụ ký Ed25519 trong docs Binance.
-  - Hyperliquid: so từng byte với `sign_l1_action` của SDK, cho đủ 7 loại `op` (cả `subAccountTransfer`, `subAccountSpotTransfer` lẫn `borrowLend`).
+  - Hyperliquid: so từng byte với `sign_l1_action` của SDK, cho đủ 8 loại `op` (cả `subAccountTransfer`, `subAccountSpotTransfer`, `borrowLend` lẫn `createSubAccount`).
 - **Policy:** mỗi quy tắc trong `signer-api.md` có ít nhất một test cho trường hợp bị chặn, kèm một payload hợp lệ đi qua được.
 - **Keystore:**
   - sai passphrase → không mở được;

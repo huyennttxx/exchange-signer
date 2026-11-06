@@ -27,6 +27,9 @@ MAX_UINT64 = 2**64 - 1
 # Gửi / rút USDC Earn (money market của HyperCore). Không ký borrow / repay
 ALLOWED_EARN_ACTION = ("type", "operation", "token", "amount")
 EARN_OPERATIONS = ("supply", "withdraw")
+# Tạo sub-account mới dưới master: chỉ có tên, không chuyển tiền
+ALLOWED_CREATE_SUB_ACTION = ("type", "name")
+MAX_SUB_NAME_LEN = 64
 
 _ADDRESS_RE = re.compile(r"0x[0-9a-fA-F]{40}")
 _TOKEN_RE = re.compile(r"[A-Za-z0-9]+:0x[0-9a-fA-F]{32}")  # <tên>:<token id>, ví dụ USDC:0x6d1e…
@@ -83,6 +86,8 @@ def detect_op(action: dict) -> tuple[str, ...]:
         return ("sub_account_transfer",)
     if t == "borrowLend":
         return ("earn_transfer",)
+    if t == "createSubAccount":
+        return ("create_sub_account",)
     return ()
 
 
@@ -153,6 +158,15 @@ def _check_earn(action: dict) -> None:
         policy.check_qty(amount, None)
 
 
+def _check_create_sub_account(action: dict) -> None:
+    policy.check_params("action", action, ALLOWED_CREATE_SUB_ACTION)
+    name = action.get("name")
+    if not (isinstance(name, str) and 0 < len(name) <= MAX_SUB_NAME_LEN and name.isprintable()
+            and name == name.strip()):
+        raise Reject("INVALID_REQUEST", f"name {name!r} must be 1..{MAX_SUB_NAME_LEN} printable characters, "
+                                        "no leading / trailing spaces")
+
+
 def verify(op: str, payload, rule: Rule, max_age_ms: int, now_ms: int) -> None:
     payload = _obj("payload", payload)
     action = _obj("payload.action", payload.get("action"))
@@ -193,6 +207,11 @@ def verify(op: str, payload, rule: Rule, max_age_ms: int, now_ms: int) -> None:
             raise Reject("PARAM_NOT_ALLOWED", "vaultAddress is not allowed for sub_account_transfer")
     elif op == "earn_transfer":
         _check_earn(action)
+    elif op == "create_sub_account":
+        _check_create_sub_account(action)
+        # Sub-account tạo dưới tài khoản master đã ký; không tạo được từ sub-account / vault
+        if payload.get("vaultAddress") is not None:
+            raise Reject("PARAM_NOT_ALLOWED", "vaultAddress is not allowed for create_sub_account")
     else:
         policy.check_params("action", action, ALLOWED_LEVERAGE_ACTION)
         policy.check_asset(action.get("asset"), rule.allowed)

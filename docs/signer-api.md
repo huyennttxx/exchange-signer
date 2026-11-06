@@ -194,7 +194,7 @@ BE gửi `POST /exchange` với body `{ "action", "nonce", "signature" }`, kèm 
 
 ## Thao tác được phép
 
-- `op` khác 7 giá trị dưới đây: `403 OP_NOT_ALLOWED`.
+- `op` khác 8 giá trị dưới đây: `403 OP_NOT_ALLOWED`.
 - Payload không khớp với `op` đã khai báo: `403 OP_MISMATCH`. Ví dụ khai `op = set_leverage` nhưng payload lại là lệnh đặt.
 
 | `op` | Endpoint của BE | Binance: payload phải có | Hyperliquid: payload phải có |
@@ -206,10 +206,11 @@ BE gửi `POST /exchange` với body `{ "action", "nonce", "signature" }`, kèm 
 | `set_leverage` | `POST /v1/leverage` | `leverage` (→ `POST /fapi/v1/leverage`) | `action.type = "updateLeverage"` |
 | `sub_account_transfer` | — | Không hỗ trợ (luôn `403 OP_MISMATCH`) | `action.type = "subAccountTransfer"` (USDC perp) hoặc `"subAccountSpotTransfer"` (token spot) |
 | `earn_transfer` | — | Không hỗ trợ (luôn `403 OP_MISMATCH`) | `action.type = "borrowLend"`, `operation` là `"supply"` hoặc `"withdraw"` |
+| `create_sub_account` | — | Không hỗ trợ (luôn `403 OP_MISMATCH`) | `action.type = "createSubAccount"` |
 
 Không có trong danh sách, và **không bao giờ được ký**:
 - rút tiền, chuyển tiền ra ngoài hoặc giữa perp ↔ spot (`withdraw3`, `usdSend`, `spotSend`, `sendAsset`, `usdClassTransfer`, `vaultTransfer`). Chỉ chuyển giữa master và sub-account (`sub_account_transfer`) được ký;
-- tạo / sửa sub-account (`createSubAccount`, `subAccountModify`);
+- sửa sub-account (`subAccountModify`). Chỉ tạo sub-account mới (`create_sub_account`) được ký;
 - vay và trả nợ trong Earn (`borrowLend` với `operation` = `borrow` / `repay`). Chỉ gửi / rút (`supply` / `withdraw`) được ký;
 - `approveAgent`, `approveBuilderFee`;
 - cancel-all, batch order;
@@ -235,10 +236,11 @@ Mỗi thao tác có một danh sách tham số được phép. **Có bất kỳ 
 | Đổi đòn bẩy | `symbol`, `leverage`, `recvWindow`, `timestamp` | `action`: `type`, `asset`, `isCross`, `leverage` |
 | Chuyển master ↔ sub-account | — | `subAccountTransfer`: `type`, `subAccountUser`, `isDeposit`, `usd`. `subAccountSpotTransfer`: `type`, `subAccountUser`, `isDeposit`, `token`, `amount` |
 | Gửi / rút Earn | — | `action`: `type`, `operation`, `token`, `amount` |
+| Tạo sub-account | — | `action`: `type`, `name` |
 
 Với Hyperliquid, ngoài `action` thì `payload` chỉ được có thêm:
 - `nonce`
-- `vaultAddress` (tuỳ chọn): địa chỉ sub-account hoặc vault mà lệnh được thực hiện trên đó. Phải là `null` hoặc chuỗi `0x` + 40 ký tự hex; sai định dạng thì trả `400 INVALID_REQUEST`. Không có hoặc `null` thì lệnh áp dụng cho chính tài khoản của agent key. Với `sub_account_transfer`, `vaultAddress` phải không có hoặc `null` (sai thì `403 PARAM_NOT_ALLOWED`): sub-account nằm trong `action.subAccountUser`.
+- `vaultAddress` (tuỳ chọn): địa chỉ sub-account hoặc vault mà lệnh được thực hiện trên đó. Phải là `null` hoặc chuỗi `0x` + 40 ký tự hex; sai định dạng thì trả `400 INVALID_REQUEST`. Không có hoặc `null` thì lệnh áp dụng cho chính tài khoản của agent key. Với `sub_account_transfer` và `create_sub_account`, `vaultAddress` phải không có hoặc `null` (sai thì `403 PARAM_NOT_ALLOWED`): sub-account nằm trong `action.subAccountUser`.
 
 Field `expiresAfter` không được phép.
 
@@ -253,11 +255,13 @@ Field `expiresAfter` không được phép.
 | Lệnh bảo hiểm phải đóng vị thế | `closePosition = true`, `type` là `STOP_MARKET` hoặc `TAKE_PROFIT_MARKET` | Mọi lệnh có `r = true` và `t.trigger` | `403 MUST_CLOSE_POSITION` |
 | Chuyển master ↔ sub-account | — | `subAccountUser` là `0x` + 40 hex, `isDeposit` là `true` / `false`, `token` dạng `<tên>:0x` + 32 hex (sai thì `400 INVALID_REQUEST`). `usd` là số nguyên `> 0` (đơn vị 1e-6 USDC: `1000000` = 1 USDC); `amount` là chuỗi số thập phân `> 0` | `403 QTY_EXCEEDS_LIMIT` |
 | Gửi / rút Earn | — | `operation` là `supply` hoặc `withdraw` (khác thì `403 PARAM_NOT_ALLOWED`). `token` là chỉ số token, số nguyên `≥ 0`, mọi token (`0` = USDC; sai thì `400 INVALID_REQUEST`). `amount` là chuỗi số thập phân `> 0`, hoặc `null` = toàn bộ | `403 QTY_EXCEEDS_LIMIT` |
+| Tạo sub-account | — | `name` là chuỗi 1–64 ký tự in được, không có khoảng trắng ở đầu / cuối | `400 INVALID_REQUEST` |
 | Payload còn mới | `timestamp` lệch so với giờ Signer không quá `max_payload_age_ms`; `recvWindow ≤ 20000` | `nonce` lệch so với giờ Signer không quá `max_payload_age_ms` | `403 STALE_PAYLOAD` |
 
 Giải thích các quy tắc dễ bị hiểu nhầm:
 - **Chuyển master ↔ sub-account không có hạn mức và không phụ thuộc symbol của key.** Sàn chỉ nhận `subAccountUser` là sub-account của chính master đã ký, nên tiền không ra khỏi các tài khoản của mình. `isDeposit = true`: master → sub; `false`: sub → master.
 - **Gửi / rút Earn không có hạn mức, không phụ thuộc symbol của key, nhận mọi token.** Tiền chỉ chuyển giữa số dư spot và Earn của cùng tài khoản. `vaultAddress` dùng được như với lệnh đặt (gửi / rút trên sub-account). Lệnh rút có thể bị sàn từ chối khi pool đang được vay 100%.
+- **Tạo sub-account không có hạn mức và không phụ thuộc symbol của key.** Sub-account mới thuộc master đã ký, chưa có tiền; không có tiền nào được chuyển. Sàn tự giới hạn số sub-account mỗi master.
 - **Mỗi request chỉ một lệnh.** Nếu cho phép batch, BE có thể gửi 100 lệnh, mỗi lệnh nhỏ hơn hạn mức, và tổng cộng vượt hạn mức rất xa.
 - **Payload phải còn mới.** Mục đích là chặn việc ký trước rồi giữ lại để dùng sau. Hyperliquid chấp nhận nonce cũ tới khoảng 2 ngày, nên nếu Signer không kiểm tra thì một chữ ký có thể bị giữ lại và dùng rất lâu sau đó.
 
@@ -339,6 +343,14 @@ Giới hạn đi theo từng key, trong section `[key:<key_id>]` của `config.i
   { "action": { "type": "borrowLend", "operation": "withdraw", "token": 0, "amount": null }, "nonce": 1729500000000 }
   ```
 
+### Tạo sub-account (chỉ Hyperliquid)
+
+```json
+{ "action": { "type": "createSubAccount", "name": "bot-1" }, "nonce": 1729500000000 }
+```
+
+Địa chỉ của sub-account mới nằm trong response của sàn (hoặc query `/info` với `{"type": "subAccounts", "user": <master>}`).
+
 ---
 
 ## Lỗi
@@ -353,7 +365,7 @@ Khi lỗi, Signer **không bao giờ trả về chữ ký**.
 |---|---|---|
 | 400 | `INVALID_REQUEST` | Body không phải JSON, hoặc `payload` không đọc được |
 | 401 | `UNAUTHENTICATED` | `key_id` không tồn tại hoặc không có section trong config, IP không nằm trong `allowed_ips` của key, hoặc HMAC sai / thiếu / quá cũ |
-| 403 | `OP_NOT_ALLOWED` | `op` không nằm trong 7 thao tác được phép |
+| 403 | `OP_NOT_ALLOWED` | `op` không nằm trong 8 thao tác được phép |
 | 403 | `OP_MISMATCH` | Payload không khớp với `op` đã khai báo |
 | 403 | `PARAM_NOT_ALLOWED` | Có tham số nằm ngoài whitelist, hoặc `newOrderRespType` / `priceProtect` có giá trị khác giá trị được phép |
 | 403 | `SYMBOL_NOT_ALLOWED` | Symbol / asset không có trong section của key |
@@ -377,6 +389,7 @@ Các lỗi `403` từ `OP_NOT_ALLOWED` trở xuống trong bảng là dấu hi�
 - [ ] **Hyperliquid `positionTpsl`:** thử trên testnet xem `s` có tự co giãn theo khối lượng vị thế không.
 - [ ] **Hyperliquid `subAccountTransfer` bằng agent key:** thử trên testnet xem sàn có nhận chữ ký của API wallet (agent) cho hai action chuyển sub-account không, hay bắt buộc ký bằng key của master.
 - [ ] **Hyperliquid `borrowLend`:** Signer ký như L1 action (giống `sign_l1_action`, theo ví dụ của Chainstack). Docs chính thức và SDK chưa có action này, một số nguồn gọi là user-signed EIP-712: thử `supply` / `withdraw` trên testnet trước khi BE dùng, kể cả bằng agent key.
+- [ ] **Hyperliquid `createSubAccount` bằng agent key và độ dài tên:** thử trên testnet xem sàn có nhận chữ ký của agent không (hay bắt buộc key master), và tên dài tối đa bao nhiêu ký tự (Signer đang cho tới 64).
 - [ ] **Giới hạn giá:** Signer không có giá thị trường nên không chặn được lệnh đặt giá vô lý.
   - Có thể thêm giới hạn `qty × price < max_notional_usd`.
   - Hoặc chấp nhận rằng `max_qty` theo symbol đã đủ để giới hạn thiệt hại.

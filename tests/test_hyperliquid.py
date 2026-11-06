@@ -16,7 +16,7 @@ except ImportError:  # SDK chỉ cài trong môi trường test
     sign_l1_action = None
 
 TRADE_OPS = ("place_order", "cancel_order", "place_conditional", "cancel_conditional", "set_leverage")
-OPS = TRADE_OPS + ("sub_account_transfer", "earn_transfer")
+OPS = TRADE_OPS + ("sub_account_transfer", "earn_transfer", "create_sub_account")
 # Mẫu payload của helpers.hl: mọi op, thêm bản spot của sub_account_transfer
 SAMPLES = OPS + ("sub_account_spot_transfer",)
 
@@ -407,6 +407,63 @@ class EarnTransferTest(unittest.TestCase):
         p = hl(self.OP)
         p["nonce"] = NOW + 10_001
         self.rejects("STALE_PAYLOAD", p)
+
+
+class CreateSubAccountTest(unittest.TestCase):
+    OP = "create_sub_account"
+
+    def rejects(self, code, payload=None, **fields):
+        p = payload or hl(self.OP)
+        p["action"].update(fields)
+        with self.assertRaises(Reject) as cm:
+            hyperliquid.verify(self.OP, p, RULE_HL, MAX_AGE_MS, NOW)
+        self.assertEqual(cm.exception.code, code, cm.exception.message)
+
+    def test_ok(self):
+        # Không phụ thuộc symbol của key
+        rule = Rule(max_leverage=1, allowed={1: Decimal("1")})
+        for name in ("a", "bot-1", "Sub Account 2", "x" * 64, "tài khoản"):
+            with self.subTest(name=name):
+                p = hl(self.OP)
+                p["action"]["name"] = name
+                hyperliquid.verify(self.OP, p, rule, MAX_AGE_MS, NOW)
+
+    def test_name(self):
+        for name in (None, "", " ", " a", "a ", "x" * 65, "a\nb", "a\x00", 1, True, [], {}):
+            with self.subTest(name=name):
+                self.rejects("INVALID_REQUEST", name=name)
+        p = hl(self.OP)
+        del p["action"]["name"]
+        self.rejects("INVALID_REQUEST", p)
+
+    def test_param_not_allowed(self):
+        self.rejects("PARAM_NOT_ALLOWED", subAccountUser=SUB_ACCOUNT)
+        for extra in ("expiresAfter", "evil"):
+            p = hl(self.OP)
+            p[extra] = NOW
+            self.rejects("PARAM_NOT_ALLOWED", p)
+
+    def test_no_vault_address(self):
+        p = hl(self.OP)
+        p["vaultAddress"] = None
+        hyperliquid.verify(self.OP, p, RULE_HL, MAX_AGE_MS, NOW)
+        p["vaultAddress"] = SUB_ACCOUNT
+        self.rejects("PARAM_NOT_ALLOWED", p)
+
+    def test_op_mismatch(self):
+        for op in TRADE_OPS + ("sub_account_transfer", "earn_transfer"):
+            with self.subTest(op=op):
+                with self.assertRaises(Reject) as cm:
+                    hyperliquid.verify(op, hl(self.OP), RULE_HL, MAX_AGE_MS, NOW)
+                self.assertEqual(cm.exception.code, "OP_MISMATCH")
+        self.rejects("OP_MISMATCH", {"action": {"type": "subAccountModify", "subAccountUser": SUB_ACCOUNT,
+                                                "name": "x"}, "nonce": NOW})
+
+    def test_stale(self):
+        p = hl(self.OP)
+        p["nonce"] = NOW - 10_001
+        self.rejects("STALE_PAYLOAD", p)
+
 
 if __name__ == "__main__":
     unittest.main()
