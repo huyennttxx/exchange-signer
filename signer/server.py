@@ -122,7 +122,7 @@ class Signer:
             return {"signature": binance.sign(key.secret, payload)}
         hyperliquid.verify(op, payload, rule, max_age, now_ms)
         return {"signature": hyperliquid.sign(key.secret, payload["action"], payload["nonce"],
-                                              st.cfg.hyperliquid_mainnet)}
+                                              st.cfg.hyperliquid_mainnet, payload.get("vaultAddress"))}
 
 
 class Handler(BaseHTTPRequestHandler):

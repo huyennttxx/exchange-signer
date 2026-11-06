@@ -186,7 +186,7 @@ Response:
 { "signature": { "r": "0x…", "s": "0x…", "v": 27 } }
 ```
 
-BE gửi `POST /exchange` với body `{ "action", "nonce", "signature" }`.
+BE gửi `POST /exchange` với body `{ "action", "nonce", "signature" }`, kèm `"vaultAddress"` y hệt nếu payload gửi sang Signer có field này. Chữ ký gắn với `vaultAddress`, nên thiếu hoặc khác thì chữ ký sai.
 - `action` phải **giữ nguyên thứ tự key** như lúc gửi sang Signer.
 - Lý do: chữ ký được tính trên `action` encode bằng msgpack, theo đúng thứ tự key. Đổi thứ tự thì chữ ký sai.
 
@@ -194,7 +194,7 @@ BE gửi `POST /exchange` với body `{ "action", "nonce", "signature" }`.
 
 ## Thao tác được phép
 
-- `op` khác 5 giá trị dưới đây: `403 OP_NOT_ALLOWED`.
+- `op` khác 6 giá trị dưới đây: `403 OP_NOT_ALLOWED`.
 - Payload không khớp với `op` đã khai báo: `403 OP_MISMATCH`. Ví dụ khai `op = set_leverage` nhưng payload lại là lệnh đặt.
 
 | `op` | Endpoint của BE | Binance: payload phải có | Hyperliquid: payload phải có |
@@ -204,9 +204,11 @@ BE gửi `POST /exchange` với body `{ "action", "nonce", "signature" }`.
 | `place_conditional` | `POST /v1/conditional` | `algoType` (→ `POST /fapi/v1/algoOrder`) | `action.type = "order"`, `grouping = "positionTpsl"` |
 | `cancel_conditional` | `DELETE /v1/conditional/{client_algo_id}` | `clientAlgoId`, không có `algoType` (→ `DELETE /fapi/v1/algoOrder`) | `action.type = "cancelByCloid"` |
 | `set_leverage` | `POST /v1/leverage` | `leverage` (→ `POST /fapi/v1/leverage`) | `action.type = "updateLeverage"` |
+| `sub_account_transfer` | — | Không hỗ trợ (luôn `403 OP_MISMATCH`) | `action.type = "subAccountTransfer"` (USDC perp) hoặc `"subAccountSpotTransfer"` (token spot) |
 
 Không có trong danh sách, và **không bao giờ được ký**:
-- rút tiền, chuyển tiền (`withdraw3`, `usdSend`, `spotSend`, `usdClassTransfer`);
+- rút tiền, chuyển tiền ra ngoài hoặc giữa perp ↔ spot (`withdraw3`, `usdSend`, `spotSend`, `sendAsset`, `usdClassTransfer`, `vaultTransfer`). Chỉ chuyển giữa master và sub-account (`sub_account_transfer`) được ký;
+- tạo / sửa sub-account (`createSubAccount`, `subAccountModify`);
 - `approveAgent`, `approveBuilderFee`;
 - cancel-all, batch order;
 - đổi chế độ margin;
@@ -229,8 +231,13 @@ Mỗi thao tác có một danh sách tham số được phép. **Có bất kỳ 
 | Đặt lệnh bảo hiểm | `algoType`, `symbol`, `side`, `type`, `triggerPrice`, `closePosition`, `workingType`, `priceProtect` (chỉ `false`), `clientAlgoId`, `recvWindow`, `timestamp` | Giống "Đặt lệnh" |
 | Huỷ lệnh bảo hiểm | `symbol`, `clientAlgoId`, `recvWindow`, `timestamp` | Giống "Huỷ lệnh" |
 | Đổi đòn bẩy | `symbol`, `leverage`, `recvWindow`, `timestamp` | `action`: `type`, `asset`, `isCross`, `leverage` |
+| Chuyển master ↔ sub-account | — | `subAccountTransfer`: `type`, `subAccountUser`, `isDeposit`, `usd`. `subAccountSpotTransfer`: `type`, `subAccountUser`, `isDeposit`, `token`, `amount` |
 
-Với Hyperliquid, ngoài `action` thì `payload` chỉ được có thêm `nonce`. Hai field `vaultAddress` và `expiresAfter` không được phép.
+Với Hyperliquid, ngoài `action` thì `payload` chỉ được có thêm:
+- `nonce`
+- `vaultAddress` (tuỳ chọn): địa chỉ sub-account hoặc vault mà lệnh được thực hiện trên đó. Phải là `null` hoặc chuỗi `0x` + 40 ký tự hex; sai định dạng thì trả `400 INVALID_REQUEST`. Không có hoặc `null` thì lệnh áp dụng cho chính tài khoản của agent key. Với `sub_account_transfer`, `vaultAddress` phải không có hoặc `null` (sai thì `403 PARAM_NOT_ALLOWED`): sub-account nằm trong `action.subAccountUser`.
+
+Field `expiresAfter` không được phép.
 
 ### Quy tắc rủi ro
 
@@ -241,9 +248,11 @@ Với Hyperliquid, ngoài `action` thì `payload` chỉ được có thêm `nonc
 | Khối lượng | `0 < quantity < max_qty` của symbol đó. Lệnh `reduceOnly=true`: chỉ cần `quantity > 0` | `0 < s < max_qty` của symbol đó. Lệnh `r = true`: chỉ cần `s > 0`. `place_conditional` (`positionTpsl`): nhận thêm `s = 0` (đóng cả vị thế) | `403 QTY_EXCEEDS_LIMIT` |
 | Đòn bẩy | `1 ≤ leverage ≤ max_leverage` của key | `1 ≤ leverage ≤ max_leverage` của key, và `isCross = true` | `403 LEVERAGE_EXCEEDS_LIMIT` |
 | Lệnh bảo hiểm phải đóng vị thế | `closePosition = true`, `type` là `STOP_MARKET` hoặc `TAKE_PROFIT_MARKET` | Mọi lệnh có `r = true` và `t.trigger` | `403 MUST_CLOSE_POSITION` |
+| Chuyển master ↔ sub-account | — | `subAccountUser` là `0x` + 40 hex, `isDeposit` là `true` / `false`, `token` dạng `<tên>:0x` + 32 hex (sai thì `400 INVALID_REQUEST`). `usd` là số nguyên `> 0` (đơn vị 1e-6 USDC: `1000000` = 1 USDC); `amount` là chuỗi số thập phân `> 0` | `403 QTY_EXCEEDS_LIMIT` |
 | Payload còn mới | `timestamp` lệch so với giờ Signer không quá `max_payload_age_ms`; `recvWindow ≤ 20000` | `nonce` lệch so với giờ Signer không quá `max_payload_age_ms` | `403 STALE_PAYLOAD` |
 
-Giải thích hai quy tắc dễ bị hiểu nhầm:
+Giải thích các quy tắc dễ bị hiểu nhầm:
+- **Chuyển master ↔ sub-account không có hạn mức và không phụ thuộc symbol của key.** Sàn chỉ nhận `subAccountUser` là sub-account của chính master đã ký, nên tiền không ra khỏi các tài khoản của mình. `isDeposit = true`: master → sub; `false`: sub → master.
 - **Mỗi request chỉ một lệnh.** Nếu cho phép batch, BE có thể gửi 100 lệnh, mỗi lệnh nhỏ hơn hạn mức, và tổng cộng vượt hạn mức rất xa.
 - **Payload phải còn mới.** Mục đích là chặn việc ký trước rồi giữ lại để dùng sau. Hyperliquid chấp nhận nonce cũ tới khoảng 2 ngày, nên nếu Signer không kiểm tra thì một chữ ký có thể bị giữ lại và dùng rất lâu sau đó.
 
@@ -303,6 +312,17 @@ Giới hạn đi theo từng key, trong section `[key:<key_id>]` của `config.i
   { "action": { "type": "updateLeverage", "asset": 0, "isCross": true, "leverage": 3 }, "nonce": 1729500000000 }
   ```
 
+### Chuyển giữa master và sub-account (chỉ Hyperliquid)
+
+- USDC perp, master → sub (`usd` = 1 USDC):
+  ```json
+  { "action": { "type": "subAccountTransfer", "subAccountUser": "0x…", "isDeposit": true, "usd": 1000000 }, "nonce": 1729500000000 }
+  ```
+- Token spot, sub → master:
+  ```json
+  { "action": { "type": "subAccountSpotTransfer", "subAccountUser": "0x…", "isDeposit": false, "token": "USDC:0x6d1e7cde53ba9467b783cb7c530ce054", "amount": "12.5" }, "nonce": 1729500000000 }
+  ```
+
 ---
 
 ## Lỗi
@@ -317,12 +337,12 @@ Khi lỗi, Signer **không bao giờ trả về chữ ký**.
 |---|---|---|
 | 400 | `INVALID_REQUEST` | Body không phải JSON, hoặc `payload` không đọc được |
 | 401 | `UNAUTHENTICATED` | `key_id` không tồn tại hoặc không có section trong config, IP không nằm trong `allowed_ips` của key, hoặc HMAC sai / thiếu / quá cũ |
-| 403 | `OP_NOT_ALLOWED` | `op` không nằm trong 5 thao tác được phép |
+| 403 | `OP_NOT_ALLOWED` | `op` không nằm trong 6 thao tác được phép |
 | 403 | `OP_MISMATCH` | Payload không khớp với `op` đã khai báo |
 | 403 | `PARAM_NOT_ALLOWED` | Có tham số nằm ngoài whitelist, hoặc `newOrderRespType` / `priceProtect` có giá trị khác giá trị được phép |
 | 403 | `SYMBOL_NOT_ALLOWED` | Symbol / asset không có trong section của key |
 | 403 | `TOO_MANY_ORDERS` | Mảng `orders` của Hyperliquid không có đúng 1 lệnh |
-| 403 | `QTY_EXCEEDS_LIMIT` | Khối lượng `≤ 0` (`< 0` với lệnh `positionTpsl`), `≥ max_qty` của symbol (trừ lệnh reduce-only), hoặc không đọc được thành số |
+| 403 | `QTY_EXCEEDS_LIMIT` | Khối lượng `≤ 0` (`< 0` với lệnh `positionTpsl`), `≥ max_qty` của symbol (trừ lệnh reduce-only), hoặc không đọc được thành số. Với `sub_account_transfer`: `usd` / `amount` không hợp lệ |
 | 403 | `LEVERAGE_EXCEEDS_LIMIT` | Đòn bẩy ngoài khoảng `1…max_leverage` của key, hoặc không phải cross |
 | 403 | `MUST_CLOSE_POSITION` | Lệnh bảo hiểm không phải lệnh đóng vị thế |
 | 403 | `STALE_PAYLOAD` | `timestamp` / `nonce` quá cũ hoặc ở tương lai, hoặc `recvWindow` quá lớn |
@@ -339,6 +359,7 @@ Các lỗi `403` từ `OP_NOT_ALLOWED` trở xuống trong bảng là dấu hi�
   - Các tên cần kiểm tra: `algoType`, `triggerPrice`, `clientAlgoId`, `closePosition`.
   - Kiểm tra thêm: lệnh huỷ algo có nhận tham số `symbol` không.
 - [ ] **Hyperliquid `positionTpsl`:** thử trên testnet xem `s` có tự co giãn theo khối lượng vị thế không.
+- [ ] **Hyperliquid `subAccountTransfer` bằng agent key:** thử trên testnet xem sàn có nhận chữ ký của API wallet (agent) cho hai action chuyển sub-account không, hay bắt buộc ký bằng key của master.
 - [ ] **Giới hạn giá:** Signer không có giá thị trường nên không chặn được lệnh đặt giá vô lý.
   - Có thể thêm giới hạn `qty × price < max_notional_usd`.
   - Hoặc chấp nhận rằng `max_qty` theo symbol đã đủ để giới hạn thiệt hại.

@@ -111,7 +111,7 @@ pip install -r requirements-test.txt
 python -m unittest discover -s tests -t .
 ```
 
-Test chữ ký Hyperliquid so từng byte với `sign_l1_action` của SDK (5 op × mainnet/testnet, và 299 key khác nhau); tự bỏ qua nếu chưa cài SDK.
+Test chữ ký Hyperliquid so từng byte với `sign_l1_action` của SDK (6 op, gồm 2 action chuyển sub-account, × mainnet/testnet, và 299 key khác nhau); tự bỏ qua nếu chưa cài SDK.
 
 ## Các quyết định đang tạm chọn
 

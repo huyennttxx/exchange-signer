@@ -287,14 +287,15 @@ _DOMAIN_SEPARATOR = _keccak(
 )
 
 
-def connection_id(action: dict, nonce: int) -> bytes:
-    # vaultAddress = None → b"\x00"; không dùng expiresAfter
-    return _keccak(msgpack.packb(action) + nonce.to_bytes(8, "big") + b"\x00")
+def connection_id(action: dict, nonce: int, vault_address: str | None = None) -> bytes:
+    # vaultAddress = None → b"\x00", có → b"\x01" + 20 byte địa chỉ; không dùng expiresAfter
+    vault = b"\x00" if vault_address is None else b"\x01" + bytes.fromhex(vault_address[2:])
+    return _keccak(msgpack.packb(action) + nonce.to_bytes(8, "big") + vault)
 
 
-def sign(private_key: bytes, action: dict, nonce: int, is_mainnet: bool) -> dict:
+def sign(private_key: bytes, action: dict, nonce: int, is_mainnet: bool, vault_address: str | None = None) -> dict:
     source = b"a" if is_mainnet else b"b"
-    struct_hash = _keccak(_AGENT_TYPEHASH + _keccak(source) + connection_id(action, nonce))
+    struct_hash = _keccak(_AGENT_TYPEHASH + _keccak(source) + connection_id(action, nonce, vault_address))
     digest = _keccak(b"\x19\x01" + _DOMAIN_SEPARATOR + struct_hash)
     sig = PrivateKey(private_key).sign_recoverable(digest, hasher=None)  # r(32) ‖ s(32) ‖ recid(1)
     return {"r": "0x" + sig[:32].hex(), "s": "0x" + sig[32:64].hex(), "v": sig[64] + 27}
@@ -356,7 +357,7 @@ def check_asset(a, allowed) -> None:
 - Dùng `unittest` của thư viện chuẩn. Môi trường test được cài thêm `hyperliquid-python-sdk` để lấy chữ ký đối chiếu; máy Signer thì không.
 - **Chữ ký:** so với test vector có sẵn.
   - Binance: ví dụ ký Ed25519 trong docs Binance.
-  - Hyperliquid: so từng byte với `sign_l1_action` của SDK, cho đủ 5 loại `op`.
+  - Hyperliquid: so từng byte với `sign_l1_action` của SDK, cho đủ 6 loại `op` (cả `subAccountTransfer` lẫn `subAccountSpotTransfer`).
 - **Policy:** mỗi quy tắc trong `signer-api.md` có ít nhất một test cho trường hợp bị chặn, kèm một payload hợp lệ đi qua được.
 - **Keystore:**
   - sai passphrase → không mở được;

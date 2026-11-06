@@ -7,7 +7,7 @@ from coincurve import PublicKey
 from signer.errors import Reject
 from signer.policy import Rule
 from signer.venues import hyperliquid
-from tests.helpers import MAX_AGE_MS, NOW, RULE_HL, SECP256K1_KEY, hl
+from tests.helpers import MAX_AGE_MS, NOW, RULE_HL, SECP256K1_KEY, SUB_ACCOUNT, hl
 
 try:
     from eth_account import Account
@@ -15,19 +15,36 @@ try:
 except ImportError:  # SDK chỉ cài trong môi trường test
     sign_l1_action = None
 
-OPS = ("place_order", "cancel_order", "place_conditional", "cancel_conditional", "set_leverage")
+TRADE_OPS = ("place_order", "cancel_order", "place_conditional", "cancel_conditional", "set_leverage")
+OPS = TRADE_OPS + ("sub_account_transfer",)
+# Mẫu payload của helpers.hl: mọi op, thêm bản spot của sub_account_transfer
+SAMPLES = OPS + ("sub_account_spot_transfer",)
+
+
+def op_of(sample: str) -> str:
+    return "sub_account_transfer" if sample == "sub_account_spot_transfer" else sample
+VAULT = "0x" + "ab" * 20
 
 
 @unittest.skipIf(sign_l1_action is None, "hyperliquid-python-sdk not installed")
 class SdkCompareTest(unittest.TestCase):
     def test_matches_sdk_for_every_op(self):
         wallet = Account.from_key(SECP256K1_KEY)
-        for op in OPS:
+        for op in SAMPLES:
             for mainnet in (True, False):
                 with self.subTest(op=op, mainnet=mainnet):
                     p = hl(op)
                     expected = sign_l1_action(wallet, copy.deepcopy(p["action"]), None, p["nonce"], None, mainnet)
                     self.assertEqual(hyperliquid.sign(SECP256K1_KEY, p["action"], p["nonce"], mainnet), expected)
+
+    def test_matches_sdk_with_vault(self):
+        wallet = Account.from_key(SECP256K1_KEY)
+        for vault in (VAULT, VAULT.upper().replace("0X", "0x")):
+            for op in OPS:
+                with self.subTest(op=op, vault=vault):
+                    p = hl(op)
+                    expected = sign_l1_action(wallet, copy.deepcopy(p["action"]), vault, p["nonce"], None, True)
+                    self.assertEqual(hyperliquid.sign(SECP256K1_KEY, p["action"], p["nonce"], True, vault), expected)
 
     def test_matches_sdk_many_keys(self):
         # Đủ nhiều key để gặp r/s có số 0 ở đầu và cả hai giá trị v
@@ -55,6 +72,14 @@ class SignatureTest(unittest.TestCase):
         pub = PublicKey.from_signature_and_message(raw, digest, hasher=None)
         self.assertEqual(pub, PublicKey.from_secret(SECP256K1_KEY))
 
+    def test_vault_changes_signature(self):
+        p = hl("place_order")
+        no_vault = hyperliquid.sign(SECP256K1_KEY, p["action"], NOW, True)
+        self.assertEqual(no_vault, hyperliquid.sign(SECP256K1_KEY, p["action"], NOW, True, None))
+        self.assertNotEqual(no_vault, hyperliquid.sign(SECP256K1_KEY, p["action"], NOW, True, VAULT))
+        self.assertNotEqual(hyperliquid.sign(SECP256K1_KEY, p["action"], NOW, True, VAULT),
+                            hyperliquid.sign(SECP256K1_KEY, p["action"], NOW, True, "0x" + "cd" * 20))
+
     def test_key_order_changes_signature(self):
         p = hl("set_leverage")
         reordered = dict(reversed(list(p["action"].items())))
@@ -74,9 +99,9 @@ class PolicyTest(unittest.TestCase):
         return p
 
     def test_valid_payloads(self):
-        for op in OPS:
-            with self.subTest(op=op):
-                hyperliquid.verify(op, hl(op), RULE_HL, MAX_AGE_MS, NOW)
+        for sample in SAMPLES:
+            with self.subTest(sample=sample):
+                hyperliquid.verify(op_of(sample), hl(sample), RULE_HL, MAX_AGE_MS, NOW)
 
     def test_op_mismatch(self):
         self.rejects("OP_MISMATCH", "set_leverage", hl("place_order"))
@@ -96,11 +121,24 @@ class PolicyTest(unittest.TestCase):
         p["action"]["orders"] = {"0": p["action"]["orders"][0]}
         self.rejects("INVALID_REQUEST", "place_order", p)
 
+    def test_vault_address(self):
+        for op in TRADE_OPS:
+            for vault in (VAULT, "0x" + "AbCdEf0123" * 4, None):
+                with self.subTest(op=op, vault=vault):
+                    p = hl(op)
+                    p["vaultAddress"] = vault
+                    hyperliquid.verify(op, p, RULE_HL, MAX_AGE_MS, NOW)
+        for vault in ("", "0x", VAULT[2:], VAULT + "00", VAULT[:-2], "0x" + "zz" * 20, "0X" + "ab" * 20,
+                      VAULT + "\n", 1, True, [], {}):
+            with self.subTest(vault=vault):
+                p = hl("place_order")
+                p["vaultAddress"] = vault
+                self.rejects("INVALID_REQUEST", "place_order", p)
+
     def test_param_not_allowed(self):
-        for extra in ("vaultAddress", "expiresAfter"):
-            p = hl("place_order")
-            p[extra] = "0x" + "11" * 20 if extra == "vaultAddress" else NOW + 1000
-            self.rejects("PARAM_NOT_ALLOWED", "place_order", p)
+        p = hl("place_order")
+        p["expiresAfter"] = NOW + 1000
+        self.rejects("PARAM_NOT_ALLOWED", "place_order", p)
         p = hl("place_order")
         p["action"]["builder"] = {"b": "0x" + "22" * 20, "f": 10}
         self.rejects("PARAM_NOT_ALLOWED", "place_order", p)
@@ -195,6 +233,103 @@ class PolicyTest(unittest.TestCase):
     def test_unencodable(self):
         p = self.with_order("place_order", c=2**70)
         self.rejects("INVALID_REQUEST", "place_order", p)
+
+
+class SubAccountTransferTest(unittest.TestCase):
+    OP = "sub_account_transfer"
+
+    def ok(self, sample, **fields):
+        p = hl(sample)
+        p["action"].update(fields)
+        hyperliquid.verify(self.OP, p, RULE_HL, MAX_AGE_MS, NOW)
+
+    def rejects(self, code, sample, payload=None, **fields):
+        p = payload or hl(sample)
+        p["action"].update(fields)
+        with self.assertRaises(Reject) as cm:
+            hyperliquid.verify(self.OP, p, RULE_HL, MAX_AGE_MS, NOW)
+        self.assertEqual(cm.exception.code, code, cm.exception.message)
+
+    def test_both_directions(self):
+        for sample in ("sub_account_transfer", "sub_account_spot_transfer"):
+            for deposit in (True, False):
+                with self.subTest(sample=sample, deposit=deposit):
+                    self.ok(sample, isDeposit=deposit)
+
+    def test_not_tied_to_symbols(self):
+        # Không có asset / symbol: key chỉ có ETH vẫn chuyển được
+        rule = Rule(max_leverage=1, allowed={1: Decimal("1")})
+        hyperliquid.verify(self.OP, hl("sub_account_transfer"), rule, MAX_AGE_MS, NOW)
+
+    def test_op_mismatch(self):
+        for sample in ("sub_account_transfer", "sub_account_spot_transfer"):
+            for op in TRADE_OPS:
+                with self.subTest(sample=sample, op=op):
+                    with self.assertRaises(Reject) as cm:
+                        hyperliquid.verify(op, hl(sample), RULE_HL, MAX_AGE_MS, NOW)
+                    self.assertEqual(cm.exception.code, "OP_MISMATCH")
+        for t in ("usdSend", "spotSend", "usdClassTransfer", "withdraw3", "vaultTransfer", "subAccountModify",
+                  "createSubAccount", "sendAsset"):
+            with self.subTest(t=t):
+                self.rejects("OP_MISMATCH", None, {"action": {"type": t}, "nonce": NOW})
+
+    def test_param_not_allowed(self):
+        self.rejects("PARAM_NOT_ALLOWED", "sub_account_transfer", token="USDC:0x" + "00" * 16)
+        self.rejects("PARAM_NOT_ALLOWED", "sub_account_spot_transfer", usd=1)
+        self.rejects("PARAM_NOT_ALLOWED", "sub_account_transfer", destination="0x" + "11" * 20)
+        for extra in ("expiresAfter", "evil"):
+            p = hl("sub_account_transfer")
+            p[extra] = NOW
+            self.rejects("PARAM_NOT_ALLOWED", None, p)
+
+    def test_no_vault_address(self):
+        for sample in ("sub_account_transfer", "sub_account_spot_transfer"):
+            p = hl(sample)
+            p["vaultAddress"] = None
+            hyperliquid.verify(self.OP, p, RULE_HL, MAX_AGE_MS, NOW)
+            p["vaultAddress"] = SUB_ACCOUNT
+            self.rejects("PARAM_NOT_ALLOWED", None, p)
+
+    def test_sub_account_user(self):
+        for user in (None, "", SUB_ACCOUNT[2:], SUB_ACCOUNT + "00", "0x" + "zz" * 20, SUB_ACCOUNT + "\n", 1, []):
+            with self.subTest(user=user):
+                self.rejects("INVALID_REQUEST", "sub_account_transfer", subAccountUser=user)
+                self.rejects("INVALID_REQUEST", "sub_account_spot_transfer", subAccountUser=user)
+        p = hl("sub_account_transfer")
+        del p["action"]["subAccountUser"]
+        self.rejects("INVALID_REQUEST", None, p)
+
+    def test_is_deposit(self):
+        for v in (None, 1, 0, "true", "false"):
+            with self.subTest(v=v):
+                self.rejects("INVALID_REQUEST", "sub_account_transfer", isDeposit=v)
+
+    def test_usd(self):
+        self.ok("sub_account_transfer", usd=1)
+        self.ok("sub_account_transfer", usd=2**64 - 1)
+        for usd in (0, -1, 2**64, True, 1.5, 1.0, "1000000", None):
+            with self.subTest(usd=usd):
+                self.rejects("QTY_EXCEEDS_LIMIT", "sub_account_transfer", usd=usd)
+
+    def test_spot_amount(self):
+        for amount in ("0.000001", "100", "1000000.5"):
+            with self.subTest(amount=amount):
+                self.ok("sub_account_spot_transfer", amount=amount)
+        for amount in ("0", "-1", "NaN", "Infinity", "x", "", 1, 1.5, True, None):
+            with self.subTest(amount=amount):
+                self.rejects("QTY_EXCEEDS_LIMIT", "sub_account_spot_transfer", amount=amount)
+
+    def test_spot_token(self):
+        self.ok("sub_account_spot_transfer", token="PURR:0xc1fb593aeffbeb02f85e0308e9956a90")
+        for token in ("USDC", "USDC:", "USDC:0x" + "00" * 15, "USDC:0x" + "00" * 17, ":0x" + "00" * 16,
+                      "USDC:" + "00" * 16, "US DC:0x" + "00" * 16, None, 0):
+            with self.subTest(token=token):
+                self.rejects("INVALID_REQUEST", "sub_account_spot_transfer", token=token)
+
+    def test_stale(self):
+        p = hl("sub_account_transfer")
+        p["nonce"] = NOW - 10_001
+        self.rejects("STALE_PAYLOAD", None, p)
 
 
 if __name__ == "__main__":

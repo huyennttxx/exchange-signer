@@ -3,7 +3,8 @@ from decimal import Decimal, InvalidOperation
 
 from signer.errors import Reject
 
-OPS = ("place_order", "cancel_order", "place_conditional", "cancel_conditional", "set_leverage")
+OPS = ("place_order", "cancel_order", "place_conditional", "cancel_conditional", "set_leverage",
+       "sub_account_transfer")
 
 
 @dataclass(frozen=True)

@@ -1,5 +1,6 @@
 import configparser
 import os
+import re
 
 import msgpack
 from coincurve import PrivateKey
@@ -11,7 +12,7 @@ from signer.policy import Rule
 
 ASSETS_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hyperliquid_assets.ini")
 
-ALLOWED_PAYLOAD = ("action", "nonce")
+ALLOWED_PAYLOAD = ("action", "nonce", "vaultAddress")
 ALLOWED_ORDER_ACTION = ("type", "orders", "grouping")
 ALLOWED_ORDER = ("a", "b", "p", "s", "r", "t", "c")
 ALLOWED_LIMIT = ("tif",)
@@ -19,6 +20,13 @@ ALLOWED_TRIGGER = ("isMarket", "triggerPx", "tpsl")
 ALLOWED_CANCEL_ACTION = ("type", "cancels")
 ALLOWED_CANCEL = ("asset", "cloid")
 ALLOWED_LEVERAGE_ACTION = ("type", "asset", "isCross", "leverage")
+# Chuyển giữa master và sub-account: USDC perp (usd = số nguyên, đơn vị 1e-6 USDC) và token spot
+ALLOWED_SUB_TRANSFER_ACTION = ("type", "subAccountUser", "isDeposit", "usd")
+ALLOWED_SUB_SPOT_TRANSFER_ACTION = ("type", "subAccountUser", "isDeposit", "token", "amount")
+MAX_UINT64 = 2**64 - 1
+
+_ADDRESS_RE = re.compile(r"0x[0-9a-fA-F]{40}")
+_TOKEN_RE = re.compile(r"[A-Za-z0-9]+:0x[0-9a-fA-F]{32}")  # <tên>:<token id>, ví dụ USDC:0x6d1e…
 
 
 _asset_tables: dict[str, dict[str, int]] = {}
@@ -68,6 +76,8 @@ def detect_op(action: dict) -> tuple[str, ...]:
         return ("cancel_order", "cancel_conditional")
     if t == "updateLeverage":
         return ("set_leverage",)
+    if t in ("subAccountTransfer", "subAccountSpotTransfer"):
+        return ("sub_account_transfer",)
     return ()
 
 
@@ -94,6 +104,29 @@ def _check_order(i: int, order) -> None:
         policy.check_params(f"{where}.t.limit", _obj(f"{where}.t.limit", t["limit"]), ALLOWED_LIMIT)
     else:
         policy.check_params(f"{where}.t.trigger", _obj(f"{where}.t.trigger", t["trigger"]), ALLOWED_TRIGGER)
+
+
+def _check_sub_account_transfer(action: dict) -> None:
+    """Chỉ chuyển giữa master và sub-account của chính nó: sàn từ chối subAccountUser không phải sub của master."""
+    spot = action["type"] == "subAccountSpotTransfer"
+    policy.check_params("action", action, ALLOWED_SUB_SPOT_TRANSFER_ACTION if spot else ALLOWED_SUB_TRANSFER_ACTION)
+    user = action.get("subAccountUser")
+    if not (isinstance(user, str) and _ADDRESS_RE.fullmatch(user)):
+        raise Reject("INVALID_REQUEST", f"subAccountUser {user!r} must be 0x + 40 hex characters")
+    if type(action.get("isDeposit")) is not bool:
+        raise Reject("INVALID_REQUEST", f"isDeposit {action.get('isDeposit')!r} must be true or false")
+    if spot:
+        token = action.get("token")
+        if not (isinstance(token, str) and _TOKEN_RE.fullmatch(token)):
+            raise Reject("INVALID_REQUEST", f"token {token!r} must be <name>:0x + 32 hex characters")
+        # amount là chuỗi số thập phân như SDK gửi (str(amount))
+        if not isinstance(action.get("amount"), str):
+            raise Reject("QTY_EXCEEDS_LIMIT", f"amount {action.get('amount')!r} must be a decimal string")
+        policy.check_qty(action["amount"], None)
+    else:
+        usd = action.get("usd")
+        if type(usd) is not int or not 0 < usd <= MAX_UINT64:
+            raise Reject("QTY_EXCEEDS_LIMIT", f"usd {usd!r} must be an integer > 0 (units of 1e-6 USDC)")
 
 
 def verify(op: str, payload, rule: Rule, max_age_ms: int, now_ms: int) -> None:
@@ -129,12 +162,21 @@ def verify(op: str, payload, rule: Rule, max_age_ms: int, now_ms: int) -> None:
             policy.check_params(f"cancels[{i}]", _obj(f"cancels[{i}]", c), ALLOWED_CANCEL)
         for c in cancels:
             policy.check_asset(c.get("asset"), rule.allowed)
+    elif op == "sub_account_transfer":
+        _check_sub_account_transfer(action)
+        # Chuyển tiền ký bằng tài khoản master; vaultAddress không có nghĩa ở đây
+        if payload.get("vaultAddress") is not None:
+            raise Reject("PARAM_NOT_ALLOWED", "vaultAddress is not allowed for sub_account_transfer")
     else:
         policy.check_params("action", action, ALLOWED_LEVERAGE_ACTION)
         policy.check_asset(action.get("asset"), rule.allowed)
         if action.get("isCross") is not True:
             raise Reject("LEVERAGE_EXCEEDS_LIMIT", "isCross must be true")
         policy.check_leverage(action.get("leverage"), rule.max_leverage)
+
+    vault = payload.get("vaultAddress")
+    if vault is not None and not (isinstance(vault, str) and _ADDRESS_RE.fullmatch(vault)):
+        raise Reject("INVALID_REQUEST", f"vaultAddress {vault!r} must be null or 0x + 40 hex characters")
 
     policy.check_fresh("nonce", payload.get("nonce"), now_ms, max_age_ms)
 
@@ -144,14 +186,15 @@ def verify(op: str, payload, rule: Rule, max_age_ms: int, now_ms: int) -> None:
         raise Reject("INVALID_REQUEST", f"action cannot be encoded: {e}")
 
 
-def connection_id(action: dict, nonce: int) -> bytes:
-    # vaultAddress = None → b"\x00"; không dùng expiresAfter
-    return _keccak(msgpack.packb(action) + nonce.to_bytes(8, "big") + b"\x00")
+def connection_id(action: dict, nonce: int, vault_address: str | None = None) -> bytes:
+    # vaultAddress = None → b"\x00", có → b"\x01" + 20 byte địa chỉ; không dùng expiresAfter
+    vault = b"\x00" if vault_address is None else b"\x01" + bytes.fromhex(vault_address[2:])
+    return _keccak(msgpack.packb(action) + nonce.to_bytes(8, "big") + vault)
 
 
-def sign(private_key: bytes, action: dict, nonce: int, is_mainnet: bool) -> dict:
+def sign(private_key: bytes, action: dict, nonce: int, is_mainnet: bool, vault_address: str | None = None) -> dict:
     source = b"a" if is_mainnet else b"b"
-    struct_hash = _keccak(_AGENT_TYPEHASH + _keccak(source) + connection_id(action, nonce))
+    struct_hash = _keccak(_AGENT_TYPEHASH + _keccak(source) + connection_id(action, nonce, vault_address))
     digest = _keccak(b"\x19\x01" + _DOMAIN_SEPARATOR + struct_hash)
     sig = PrivateKey(private_key).sign_recoverable(digest, hasher=None)  # r(32) ‖ s(32) ‖ recid(1)
     # Giống SDK (eth_utils.to_hex của số nguyên): không đệm số 0 ở đầu

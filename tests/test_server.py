@@ -139,6 +139,31 @@ class ServerTest(unittest.TestCase):
         _, _, body = self.sign(HL_ID, "set_leverage", p)
         self.assertEqual(body["signature"], hyperliquid.sign(SECP256K1_KEY, p["action"], NOW, True))
 
+    def test_hyperliquid_sub_account_transfer(self):
+        from signer.venues import hyperliquid
+        for sample in ("sub_account_transfer", "sub_account_spot_transfer"):
+            with self.subTest(sample=sample):
+                p = hl(sample)
+                status, _, body = self.sign(HL_ID, "sub_account_transfer", p)
+                self.assertEqual(status, 200, body)
+                self.assertEqual(body["signature"], hyperliquid.sign(SECP256K1_KEY, p["action"], NOW, True))
+
+    def test_binance_sub_account_transfer_not_supported(self):
+        status, _, body = self.sign(BINANCE_ID, "sub_account_transfer", bn(**BN["place_order"]))
+        self.assertEqual((status, body["error"]), (403, "OP_MISMATCH"))
+
+    def test_hyperliquid_vault_address(self):
+        from signer.venues import hyperliquid
+        vault = "0x" + "ab" * 20
+        p = hl("place_order")
+        p["vaultAddress"] = vault
+        status, _, body = self.sign(HL_ID, "place_order", p)
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["signature"], hyperliquid.sign(SECP256K1_KEY, p["action"], NOW, True, vault))
+        p["vaultAddress"] = None
+        _, _, body = self.sign(HL_ID, "place_order", p)
+        self.assertEqual(body["signature"], hyperliquid.sign(SECP256K1_KEY, p["action"], NOW, True))
+
     def test_unauthenticated_is_indistinguishable(self):
         unknown = self.sign("00000000-0000-4000-8000-000000000000", "place_order", bn(**BN["place_order"]))
         wrong_ip = self.sign(OTHER_IP_ID, "place_order", bn(**BN["place_order"]))
