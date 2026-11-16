@@ -12,6 +12,12 @@ from signer.policy import Rule
 DEFAULT_RECV_WINDOW_MS = 5000
 MAX_RECV_WINDOW_MS = 20000  # chữ ký Binance hết hạn tối đa 20 s sau timestamp
 CONDITIONAL_TYPES = ("STOP_MARKET", "TAKE_PROFIT_MARKET")
+MARGIN_ORDER_TYPES = ("LIMIT", "LIMIT_MAKER")
+# BUY chỉ được vay quote; SELL chỉ được trả nợ / không side-effect (không bán khống)
+MARGIN_BUY_SIDE_EFFECTS = ("MARGIN_BUY", "NO_SIDE_EFFECT")
+MARGIN_SELL_SIDE_EFFECTS = ("AUTO_REPAY", "NO_SIDE_EFFECT")
+# Hậu tố quote phổ biến để suy ra tài sản gốc từ symbol config (BTCUSDT → BTC)
+QUOTE_SUFFIXES = ("USDT", "USDC", "BUSD", "FDUSD", "TUSD", "BTC", "ETH", "BNB")
 # Tham số chỉ được phép với đúng một giá trị
 FIXED_VALUES = {"newOrderRespType": ("RESULT",), "priceProtect": ("false", "FALSE")}
 _DIGITS = re.compile(r"[0-9]{1,19}")
@@ -22,12 +28,6 @@ TRANSFER_TYPES = (
     "ISOLATEDMARGIN_MARGIN", "ISOLATEDMARGIN_ISOLATEDMARGIN",
 )
 
-# Op margin: chỉ khớp op (trừ place_margin_order còn check symbol/qty)
-MARGIN_OP_ONLY = (
-    "cancel_margin_order", "margin_transfer", "set_margin_leverage",
-    "enable_isolated", "margin_borrow_repay",
-)
-
 ALLOWED = {
     "place_order": ("symbol", "side", "type", "quantity", "price", "timeInForce", "reduceOnly",
                     "newClientOrderId", "newOrderRespType", "recvWindow", "timestamp"),
@@ -36,6 +36,14 @@ ALLOWED = {
                           "workingType", "priceProtect", "clientAlgoId", "recvWindow", "timestamp"),
     "cancel_conditional": ("symbol", "clientAlgoId", "recvWindow", "timestamp"),
     "set_leverage": ("symbol", "leverage", "recvWindow", "timestamp"),
+    "place_margin_order": ("symbol", "isIsolated", "side", "type", "quantity", "price", "timeInForce",
+                           "newClientOrderId", "sideEffectType", "autoRepayAtCancel",
+                           "recvWindow", "timestamp"),
+    "cancel_margin_order": ("symbol", "isIsolated", "origClientOrderId", "recvWindow", "timestamp"),
+    "margin_transfer": ("type", "asset", "amount", "fromSymbol", "toSymbol", "recvWindow", "timestamp"),
+    "set_margin_leverage": ("maxLeverage", "recvWindow", "timestamp"),
+    "enable_isolated": ("symbol", "recvWindow", "timestamp"),
+    "margin_borrow_repay": ("asset", "isIsolated", "symbol", "amount", "type", "recvWindow", "timestamp"),
 }
 
 
@@ -56,6 +64,17 @@ def parse(payload) -> dict[str, str]:
 def _int(raw):
     """Chuỗi chữ số → int; giá trị khác giữ nguyên để các hàm check báo lỗi kèm giá trị gốc."""
     return int(raw) if isinstance(raw, str) and _DIGITS.fullmatch(raw) else raw
+
+
+def _base_assets(symbols) -> set[str]:
+    """Tài sản gốc suy ra từ symbol config (BTCUSDT → BTC). Dùng để cấm vay base."""
+    bases = set()
+    for sym in symbols:
+        for q in QUOTE_SUFFIXES:
+            if sym.endswith(q) and len(sym) > len(q):
+                bases.add(sym[:-len(q)])
+                break
+    return bases
 
 
 def detect_op(params: dict) -> str | None:
@@ -81,10 +100,52 @@ def detect_op(params: dict) -> str | None:
         return "cancel_conditional"
     if "leverage" in params:
         return "set_leverage"
-    # Bật isolated: symbol (+ timestamp/recvWindow), không có marker lệnh / đòn bẩy
-    if "symbol" in params:
+    # Bật isolated: đúng tập key allowlist, không đoán từ mọi payload có symbol
+    keys = set(params)
+    if "symbol" in keys and keys <= set(ALLOWED["enable_isolated"]):
         return "enable_isolated"
     return None
+
+
+def _check_place_margin_order(params: dict, rule: Rule) -> None:
+    symbol = params.get("symbol")
+    if symbol not in rule.allowed:
+        raise Reject("SYMBOL_NOT_ALLOWED",
+                     "symbol is required" if symbol is None else
+                     f"symbol {symbol!r} is not allowed for this key")
+
+    order_type = params.get("type")
+    if order_type not in MARGIN_ORDER_TYPES:
+        raise Reject("PARAM_NOT_ALLOWED",
+                     f"type {order_type!r} must be {' or '.join(MARGIN_ORDER_TYPES)}")
+
+    if params.get("autoRepayAtCancel") != "FALSE":
+        raise Reject("PARAM_NOT_ALLOWED", "autoRepayAtCancel must be FALSE")
+
+    side = params.get("side")
+    effect = params.get("sideEffectType")
+    if side == "BUY":
+        if effect not in MARGIN_BUY_SIDE_EFFECTS:
+            raise Reject("PARAM_NOT_ALLOWED",
+                         f"sideEffectType {effect!r} must be {' or '.join(MARGIN_BUY_SIDE_EFFECTS)} for BUY")
+        policy.check_qty(params.get("quantity"), rule.allowed[symbol])
+    elif side == "SELL":
+        if effect not in MARGIN_SELL_SIDE_EFFECTS:
+            raise Reject("PARAM_NOT_ALLOWED",
+                         f"sideEffectType {effect!r} must be {' or '.join(MARGIN_SELL_SIDE_EFFECTS)} for SELL")
+        # Đóng vị thế: không giới hạn quantity; bán khống đã chặn qua sideEffectType + cấm vay base
+    else:
+        raise Reject("PARAM_NOT_ALLOWED", f"side {side!r} must be BUY or SELL")
+
+
+def _check_margin_borrow_repay(params: dict, rule: Rule) -> None:
+    # Vay tài sản gốc (BTC của BTCUSDT) → bán NO_SIDE_EFFECT vẫn là bán khống
+    if params.get("type") == "BORROW":
+        asset = params.get("asset")
+        if asset in _base_assets(rule.allowed):
+            raise Reject("PARAM_NOT_ALLOWED", f"borrowing base asset {asset!r} is not allowed")
+    if "symbol" in params and params["symbol"] not in rule.allowed:
+        raise Reject("SYMBOL_NOT_ALLOWED", f"symbol {params['symbol']!r} is not allowed for this key")
 
 
 def verify(op: str, payload, rule: Rule, max_age_ms: int, now_ms: int) -> None:
@@ -94,20 +155,6 @@ def verify(op: str, payload, rule: Rule, max_age_ms: int, now_ms: int) -> None:
     if actual != op:
         raise Reject("OP_MISMATCH", f"payload is {actual or 'unrecognised'}, not {op}")
 
-    if op == "place_margin_order":
-        symbol = params.get("symbol")
-        if symbol not in rule.allowed:
-            raise Reject("SYMBOL_NOT_ALLOWED",
-                         "symbol is required" if symbol is None else
-                         f"symbol {symbol!r} is not allowed for this key")
-        # Đóng vị thế (SELL) → không giới hạn quantity; vẫn dùng max_qty trong config khi mở/tăng
-        if params.get("side") != "SELL":
-            policy.check_qty(params.get("quantity"), rule.allowed[symbol])
-        return
-
-    if op in MARGIN_OP_ONLY:
-        return
-
     policy.check_params(op, params, ALLOWED[op])
     for k, values in FIXED_VALUES.items():
         if k in params and params[k] not in values:
@@ -115,7 +162,7 @@ def verify(op: str, payload, rule: Rule, max_age_ms: int, now_ms: int) -> None:
 
     if "symbol" in params and params["symbol"] not in rule.allowed:
         raise Reject("SYMBOL_NOT_ALLOWED", f"symbol {params['symbol']!r} is not allowed for this key")
-    if op == "place_order" and "symbol" not in params:
+    if op in ("place_order", "place_margin_order") and "symbol" not in params:
         # Cần symbol để biết max_qty
         raise Reject("SYMBOL_NOT_ALLOWED", "symbol is required")
 
@@ -130,6 +177,10 @@ def verify(op: str, payload, rule: Rule, max_age_ms: int, now_ms: int) -> None:
             raise Reject("MUST_CLOSE_POSITION", f"type must be one of {', '.join(CONDITIONAL_TYPES)}")
     elif op == "set_leverage":
         policy.check_leverage(_int(params["leverage"]), rule.max_leverage)
+    elif op == "place_margin_order":
+        _check_place_margin_order(params, rule)
+    elif op == "margin_borrow_repay":
+        _check_margin_borrow_repay(params, rule)
 
     policy.check_fresh("timestamp", _int(params.get("timestamp")), now_ms, max_age_ms)
     # Không gửi recvWindow → sàn dùng mặc định 5000 ms

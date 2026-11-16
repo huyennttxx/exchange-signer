@@ -12,22 +12,22 @@ Nguồn nghiệp vụ: [`binance-margin-api.md`](../binance-margin-api.md) (Đ�
 
 ---
 
-## Op cần thêm vào Signer (tổng kết)
+## Op margin trong Signer (tổng kết)
 
-| Op | Endpoint sàn | Ai gọi Signer | Verify |
-|---|---|---|---|
-| Đặt lệnh margin | `POST /sapi/v1/margin/order` | Bot | `symbol` (allowlist config). `quantity` (`0 < quantity < max_qty` config) trừ khi đóng vị thế (`side=SELL`) thì không check quantity. Còn lại không check |
-| Hủy lệnh margin | `DELETE /sapi/v1/margin/order` | Bot | Chỉ khớp `op` |
-| Chuyển thế chấp | `POST /sapi/v1/asset/transfer` | App | Chỉ khớp `op` |
-| Đổi đòn bẩy cross | `POST /sapi/v1/margin/max-leverage` | App | Chỉ khớp `op` |
-| Bật cặp isolated | `POST /sapi/v1/margin/isolated/account` | App | Chỉ khớp `op` |
-| Vay / trả riêng | `POST /sapi/v1/margin/borrow-repay` | App | Chỉ khớp `op` |
+| `op` | Endpoint sàn | Ai gọi | Ý nghĩa | Giới hạn / verify Signer |
+|---|---|---|---|---|
+| `place_margin_order` | `POST /sapi/v1/margin/order` | Bot | Đặt lệnh margin (cross/isolated). Vay/trả lúc khớp nằm trong `sideEffectType` (`MARGIN_BUY` mua, `AUTO_REPAY` bán) | Whitelist tham số; `symbol` ∈ config; `type` ∈ {`LIMIT`,`LIMIT_MAKER`}; `autoRepayAtCancel=FALSE`; sideEffect theo side; BUY: `0 < quantity < max_qty`; **SELL không check quantity**. Freshness |
+| `cancel_margin_order` | `DELETE /sapi/v1/margin/order` | Bot | Hủy **một** lệnh margin theo `origClientOrderId` (+ `isIsolated`) | Whitelist; `symbol` ∈ config; freshness. Không ký hủy-all |
+| `margin_transfer` | `POST /sapi/v1/asset/transfer` | App | Chuyển thế chấp spot ↔ cross ↔ isolated (`type` = `MAIN_MARGIN`, `MARGIN_MAIN`, …) | Whitelist; freshness. Không hạn mức `amount` / `asset` |
+| `set_margin_leverage` | `POST /sapi/v1/margin/max-leverage` | App | Đặt đòn bẩy tối đa tài khoản **cross** (`maxLeverage`, Classic: 3 hoặc 5) | Whitelist; freshness. Không so với `max_leverage` config (khác `set_leverage` futures) |
+| `enable_isolated` | `POST /sapi/v1/margin/isolated/account` | App | Bật lại cặp isolated đã từng tắt (`symbol`). Lần đầu Binance có thể bắt bật trên web | Whitelist (`symbol`,`recvWindow`,`timestamp`); `symbol` ∈ config; freshness. Không đoán op từ mọi payload chỉ có `symbol` |
+| `margin_borrow_repay` | `POST /sapi/v1/margin/borrow-repay` | App | Vay hoặc trả nợ **riêng** (`type` = `BORROW` / `REPAY`), vd. nợ còn sau hủy với `autoRepayAtCancel=FALSE` | Whitelist; freshness; **`BORROW` không được vay tài sản gốc** (vd. `BTC` của `BTCUSDT`). Không hạn mức `amount` |
 
-Không thêm: đặt đòn bẩy isolated (không có API); đọc lệnh / GET (không qua Signer); hủy mọi lệnh cặp (bot không dùng).
+Không có op: đặt đòn bẩy isolated (không API); đọc lệnh / GET (không qua Signer); hủy mọi lệnh cặp (bot không dùng).
 
-Vay/trả lúc mua/bán vẫn nằm trong **đặt lệnh** (`sideEffectType`), không cần op riêng.
+Vay/trả lúc mua/bán vẫn nằm trong `place_margin_order` (`sideEffectType`), không cần op riêng.
 
-Phân biệt: `set_leverage` futures hiện có (`POST /fapi/v1/leverage`) khác op đòn bẩy margin ở trên.
+Phân biệt: `set_leverage` futures (`POST /fapi/v1/leverage`, có check `max_leverage` config) ≠ `set_margin_leverage`.
 
 ---
 
@@ -54,31 +54,30 @@ Phân biệt: `set_leverage` futures hiện có (`POST /fapi/v1/leverage`) khác
 
 ### Policy Signer
 
-| Op | Signer kiểm tra | Không kiểm |
-|---|---|---|
-| Đặt lệnh | `symbol` (allowlist config). `quantity` theo `max_qty` config; **đóng vị thế (`side=SELL`) → không check quantity** | Mọi tham số còn lại |
-| Mọi op khác trong bảng tổng kết (hủy, chuyển thế chấp, đòn bẩy, bật isolated, borrow-repay) | Chỉ verify đúng `op` | Không verify tham số hay quy tắc rủi ro khác |
+| Op | Signer kiểm tra |
+|---|---|
+| Đặt lệnh | Whitelist; `symbol` ∈ config; `type` ∈ {`LIMIT`,`LIMIT_MAKER`}; `autoRepayAtCancel` = `FALSE`; BUY: `sideEffectType` ∈ {`MARGIN_BUY`,`NO_SIDE_EFFECT`} + `0 < quantity < max_qty`; SELL: `sideEffectType` ∈ {`AUTO_REPAY`,`NO_SIDE_EFFECT`}, **không check quantity**; freshness |
+| Hủy / chuyển / đòn bẩy / isolated / borrow-repay | Whitelist theo op; freshness; `symbol` ∈ config nếu có; `BORROW` không vay tài sản gốc |
 
-### Tham số thường gửi (tham khảo, không phải rule Signer trừ `symbol`/`quantity` khi đặt)
+### Tham số được phép (whitelist Signer)
 
-Đặt: `symbol`, `isIsolated`, `side`, `type` (`LIMIT` / `LIMIT_MAKER`), `quantity`, `price`, `timeInForce` (chỉ `LIMIT`), `newClientOrderId`, `sideEffectType`, `autoRepayAtCancel`, `recvWindow`, `timestamp`.
+Đặt: `symbol`, `isIsolated`, `side`, `type` (`LIMIT` / `LIMIT_MAKER`), `quantity`, `price`, `timeInForce` (chỉ `LIMIT`), `newClientOrderId`, `sideEffectType`, `autoRepayAtCancel`, `recvWindow`, `timestamp`. Không nhận `quoteOrderQty`.
 
 Hủy: `symbol`, `isIsolated`, `origClientOrderId`, `recvWindow`, `timestamp`.
 
-### `sideEffectType` (bot)
+### `sideEffectType` (rule Signer)
 
-| Giá trị | Ý nghĩa | Bot hiện dùng |
+| Giá trị | Ý nghĩa | Được phép |
 |---|---|---|
-| `MARGIN_BUY` | Vay phần thiếu để đủ tiền lệnh | Lệnh mua |
-| `AUTO_REPAY` | Dùng tiền thu về trả nợ (cùng asset đã vay) | Lệnh bán |
-| `NO_SIDE_EFFECT` | Không vay, không trả | Không |
-| `AUTO_BORROW_REPAY` | Vay rồi tự trả | Không |
+| `MARGIN_BUY` | Vay phần thiếu để đủ tiền lệnh | Chỉ `side=BUY` |
+| `AUTO_REPAY` | Dùng tiền thu về trả nợ (cùng asset đã vay) | Chỉ `side=SELL` |
+| `NO_SIDE_EFFECT` | Không vay, không trả | BUY hoặc SELL |
+| `AUTO_BORROW_REPAY` | Vay rồi tự trả | **Không** (bán khống nếu kèm SELL) |
 
-### `autoRepayAtCancel` (bot)
+### `autoRepayAtCancel` (rule Signer)
 
-- Gửi **lúc đặt lệnh**, không lúc hủy.
-- Mặc định sàn = `true` (hủy lệnh `MARGIN_BUY` thì tự trả khoản đã vay).
-- Bot gửi `FALSE` — khoản vay còn sau hủy tính lãi cho tới khi bán `AUTO_REPAY` hoặc app gọi op vay/trả riêng (ký qua Signer).
+- Bắt buộc gửi **`FALSE`** lúc đặt lệnh (không gửi thì sàn mặc định `TRUE`).
+- Khoản vay còn sau hủy tính lãi cho tới khi bán `AUTO_REPAY` hoặc app gọi op vay/trả riêng (ký qua Signer).
 
 ---
 
@@ -91,6 +90,6 @@ Hủy: `symbol`, `isIsolated`, `origClientOrderId`, `recvWindow`, `timestamp`.
 
 ---
 
-## Ràng buộc khi triển khai Signer (chưa làm trong code)
+## Ràng buộc chữ ký Binance
 
-Chữ ký Binance **không** gắn path. Key futures hiện chỉ bật Futures. Margin cần Spot & Margin Trading (và quyền transfer/loan tương ứng) → cùng payload có thể bị gửi sang endpoint khác. Cần tách key/op/policy trước khi code.
+Chữ ký Binance **không** gắn path/method. Cùng query string có thể bị gửi sang endpoint khác (vd. chữ ký `enable_isolated` với `symbol`+`timestamp` trùng hình dạng `DELETE /fapi/v1/allOpenOrders`). Mitigation trong Signer: whitelist tham số theo op, `symbol` ∈ config, không đoán op từ payload thừa/thiếu marker. Nên tách key futures khỏi key margin (quyền Spot & Margin / loan / transfer).

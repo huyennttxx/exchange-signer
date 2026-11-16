@@ -138,6 +138,14 @@ class ServerTest(unittest.TestCase):
         close = bn(**{**BN["place_margin_order"], "side": "SELL", "sideEffectType": "AUTO_REPAY",
                       "quantity": "5"})
         self.assertEqual(self.sign(BINANCE_ID, "place_margin_order", close)[0], 200)
+        # Bán khống / tham số lạ / vay base → từ chối
+        short = bn(**{**BN["place_margin_order"], "side": "SELL", "sideEffectType": "MARGIN_BUY",
+                      "quantity": "100"})
+        self.assertEqual(self.sign(BINANCE_ID, "place_margin_order", short)[0], 403)
+        blind = bn(symbol="BTCUSDT", marginType="ISOLATED", recvWindow="2000", timestamp=str(NOW))
+        self.assertEqual(self.sign(BINANCE_ID, "enable_isolated", blind)[0], 403)
+        borrow_base = bn(**{**BN["margin_borrow_repay"], "asset": "BTC", "type": "BORROW"})
+        self.assertEqual(self.sign(BINANCE_ID, "margin_borrow_repay", borrow_base)[0], 403)
         # Hyperliquid không hỗ trợ op margin
         status, _, body = self.sign(HL_ID, "place_margin_order", hl("place_order"))
         self.assertEqual((status, body["error"]), (403, "OP_MISMATCH"))

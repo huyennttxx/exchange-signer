@@ -145,8 +145,25 @@ class PolicyTest(unittest.TestCase):
         self.rejects("SYMBOL_NOT_ALLOWED", "place_margin_order", symbol=None)
         self.rejects("QTY_EXCEEDS_LIMIT", "place_margin_order", quantity="0.01")
         self.ok("place_margin_order", quantity="0.0099")
-        # Tham số lạ / stale: margin place không check (chỉ symbol + qty)
-        self.ok("place_margin_order", stopPrice="1", timestamp=str(NOW - 10_001))
+        self.rejects("PARAM_NOT_ALLOWED", "place_margin_order", stopPrice="1")
+        self.rejects("PARAM_NOT_ALLOWED", "place_margin_order", quoteOrderQty="100")
+        self.rejects("STALE_PAYLOAD", "place_margin_order", timestamp=str(NOW - 10_001))
+
+    def test_margin_place_side_effect_and_type(self):
+        self.ok("place_margin_order", side="BUY", sideEffectType="NO_SIDE_EFFECT")
+        self.ok("place_margin_order", side="SELL", sideEffectType="AUTO_REPAY", quantity="5")
+        self.ok("place_margin_order", side="SELL", sideEffectType="NO_SIDE_EFFECT", quantity="5")
+        self.ok("place_margin_order", type="LIMIT_MAKER", timeInForce=None)
+        # Bán khống: SELL + vay base
+        self.rejects("PARAM_NOT_ALLOWED", "place_margin_order", side="SELL",
+                     sideEffectType="MARGIN_BUY", quantity="100")
+        self.rejects("PARAM_NOT_ALLOWED", "place_margin_order", side="SELL",
+                     sideEffectType="AUTO_BORROW_REPAY", quantity="100")
+        self.rejects("PARAM_NOT_ALLOWED", "place_margin_order", side="BUY",
+                     sideEffectType="AUTO_REPAY")
+        self.rejects("PARAM_NOT_ALLOWED", "place_margin_order", autoRepayAtCancel="TRUE")
+        self.rejects("PARAM_NOT_ALLOWED", "place_margin_order", autoRepayAtCancel=None)
+        self.rejects("PARAM_NOT_ALLOWED", "place_margin_order", type="MARKET", timeInForce=None)
 
     def test_margin_close_skips_qty(self):
         # Đóng vị thế (SELL): không giới hạn quantity theo config
@@ -154,17 +171,25 @@ class PolicyTest(unittest.TestCase):
         self.rejects("SYMBOL_NOT_ALLOWED", "place_margin_order", side="SELL", symbol="ETHUSDT",
                      sideEffectType="AUTO_REPAY", quantity="5")
 
-    def test_margin_op_only(self):
+    def test_margin_whitelist_and_freshness(self):
         for op in ("cancel_margin_order", "margin_transfer", "set_margin_leverage",
                    "enable_isolated", "margin_borrow_repay"):
             with self.subTest(op=op):
                 self.ok(op)
-        # Chỉ khớp op — không check symbol / qty / whitelist / freshness
-        self.ok("cancel_margin_order", symbol="ETHUSDT", timestamp=str(NOW - 10_001))
-        self.ok("margin_transfer", type="MARGIN_MAIN", extra="1")
-        self.ok("enable_isolated", symbol="ETHUSDT")
+                self.rejects("STALE_PAYLOAD", op, timestamp=str(NOW - 10_001))
+        self.rejects("SYMBOL_NOT_ALLOWED", "cancel_margin_order", symbol="ETHUSDT")
+        self.rejects("PARAM_NOT_ALLOWED", "margin_transfer", type="MARGIN_MAIN", extra="1")
+        self.rejects("PARAM_NOT_ALLOWED", "set_margin_leverage", marginType="ISOLATED")
+        self.rejects("SYMBOL_NOT_ALLOWED", "enable_isolated", symbol="ETHUSDT")
+        # Payload chỉ có symbol không còn là enable_isolated khi thiếu marker / tập key sai
+        self.rejects("OP_MISMATCH", "enable_isolated", "symbol=BTCUSDT&marginType=ISOLATED&timestamp=" + str(NOW))
         self.rejects("OP_MISMATCH", "margin_transfer", bn(**BN["place_margin_order"]))
         self.rejects("OP_MISMATCH", "enable_isolated", bn(**BN["set_leverage"]))
+
+    def test_margin_borrow_no_base_asset(self):
+        self.ok("margin_borrow_repay", asset="USDC", type="BORROW")
+        self.ok("margin_borrow_repay", asset="BTC", type="REPAY")  # trả nợ base vẫn được
+        self.rejects("PARAM_NOT_ALLOWED", "margin_borrow_repay", asset="BTC", type="BORROW")
 
 
 if __name__ == "__main__":

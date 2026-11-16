@@ -245,8 +245,12 @@ Mỗi thao tác có một danh sách tham số được phép. **Có bất kỳ 
 | Chuyển master ↔ sub-account | — | `subAccountTransfer`: `type`, `subAccountUser`, `isDeposit`, `usd`. `subAccountSpotTransfer`: `type`, `subAccountUser`, `isDeposit`, `token`, `amount` |
 | Gửi / rút Earn | — | `action`: `type`, `operation`, `token`, `amount` |
 | Tạo sub-account | — | `action`: `type`, `name` |
-| Đặt lệnh margin | Không whitelist tham số. Chỉ kiểm `symbol` / `quantity` theo config (xem quy tắc rủi ro) | — |
-| Huỷ margin / chuyển thế chấp / đòn bẩy margin / bật isolated / borrow-repay | Không whitelist; chỉ khớp `op` | — |
+| Đặt lệnh margin | `symbol`, `isIsolated`, `side`, `type`, `quantity`, `price`, `timeInForce`, `newClientOrderId`, `sideEffectType`, `autoRepayAtCancel`, `recvWindow`, `timestamp` | — |
+| Huỷ lệnh margin | `symbol`, `isIsolated`, `origClientOrderId`, `recvWindow`, `timestamp` | — |
+| Chuyển thế chấp margin | `type`, `asset`, `amount`, `fromSymbol`, `toSymbol`, `recvWindow`, `timestamp` | — |
+| Đòn bẩy margin (cross) | `maxLeverage`, `recvWindow`, `timestamp` | — |
+| Bật isolated | `symbol`, `recvWindow`, `timestamp` | — |
+| Vay / trả margin | `asset`, `isIsolated`, `symbol`, `amount`, `type`, `recvWindow`, `timestamp` | — |
 
 Với Hyperliquid, ngoài `action` thì `payload` chỉ được có thêm:
 - `nonce`
@@ -258,9 +262,11 @@ Field `expiresAfter` không được phép.
 
 | Quy tắc | Binance | Hyperliquid | Lỗi |
 |---|---|---|---|
-| Symbol | `symbol` là một symbol trong section của key (nếu có tham số `symbol`). `place_order` và `place_margin_order` bắt buộc có `symbol`. Các op margin chỉ-khớp-op không kiểm symbol | Mọi `a` / `asset` là chỉ số asset của một symbol trong section của key (tra `<COIN>USDC` trong `signer/hyperliquid_assets.ini`) | `403 SYMBOL_NOT_ALLOWED` |
+| Symbol | `symbol` là một symbol trong section của key (nếu có tham số `symbol`). `place_order`, `place_margin_order` và `enable_isolated` bắt buộc có `symbol` | Mọi `a` / `asset` là chỉ số asset của một symbol trong section của key (tra `<COIN>USDC` trong `signer/hyperliquid_assets.ini`) | `403 SYMBOL_NOT_ALLOWED` |
 | Số lệnh | Một payload là một lệnh (Binance không có batch trong whitelist) | `place_order` và `place_conditional`: mảng `orders` có đúng 1 phần tử | `403 TOO_MANY_ORDERS` |
-| Khối lượng | `0 < quantity < max_qty` của symbol đó. Lệnh `reduceOnly=true`: chỉ cần `quantity > 0`. `place_margin_order`: cùng hạn `max_qty` config; **`side=SELL` (đóng vị thế) không kiểm quantity** | `0 < s < max_qty` của symbol đó. Lệnh `r = true`: chỉ cần `s > 0`. `place_conditional` (`positionTpsl`): nhận thêm `s = 0` (đóng cả vị thế) | `403 QTY_EXCEEDS_LIMIT` |
+| Khối lượng | `0 < quantity < max_qty` của symbol đó. Lệnh `reduceOnly=true`: chỉ cần `quantity > 0`. `place_margin_order` BUY: cùng hạn `max_qty`; **`side=SELL` (đóng vị thế) không kiểm quantity** | `0 < s < max_qty` của symbol đó. Lệnh `r = true`: chỉ cần `s > 0`. `place_conditional` (`positionTpsl`): nhận thêm `s = 0` (đóng cả vị thế) | `403 QTY_EXCEEDS_LIMIT` |
+| Margin place | `type` chỉ `LIMIT` / `LIMIT_MAKER`; `autoRepayAtCancel` bắt buộc `FALSE`; BUY: `sideEffectType` ∈ {`MARGIN_BUY`, `NO_SIDE_EFFECT`}; SELL: ∈ {`AUTO_REPAY`, `NO_SIDE_EFFECT`}. Không nhận `quoteOrderQty` | — | `403 PARAM_NOT_ALLOWED` |
+| Margin borrow | `type=BORROW` không được vay tài sản gốc suy ra từ symbol config (vd. `BTC` của `BTCUSDT`); `REPAY` không hạn chế asset | — | `403 PARAM_NOT_ALLOWED` |
 | Đòn bẩy | `1 ≤ leverage ≤ max_leverage` của key | `1 ≤ leverage ≤ max_leverage` của key, và `isCross = true` | `403 LEVERAGE_EXCEEDS_LIMIT` |
 | Lệnh bảo hiểm phải đóng vị thế | `closePosition = true`, `type` là `STOP_MARKET` hoặc `TAKE_PROFIT_MARKET` | Mọi lệnh có `r = true` và `t.trigger` | `403 MUST_CLOSE_POSITION` |
 | Chuyển master ↔ sub-account | — | `subAccountUser` là `0x` + 40 hex, `isDeposit` là `true` / `false`, `token` dạng `<tên>:0x` + 32 hex (sai thì `400 INVALID_REQUEST`). `usd` là số nguyên `> 0` (đơn vị 1e-6 USDC: `1000000` = 1 USDC); `amount` là chuỗi số thập phân `> 0` | `403 QTY_EXCEEDS_LIMIT` |
@@ -274,6 +280,7 @@ Giải thích các quy tắc dễ bị hiểu nhầm:
 - **Tạo sub-account không có hạn mức và không phụ thuộc symbol của key.** Sub-account mới thuộc master đã ký, chưa có tiền; không có tiền nào được chuyển. Sàn tự giới hạn số sub-account mỗi master.
 - **Mỗi request chỉ một lệnh.** Nếu cho phép batch, BE có thể gửi 100 lệnh, mỗi lệnh nhỏ hơn hạn mức, và tổng cộng vượt hạn mức rất xa.
 - **Payload phải còn mới.** Mục đích là chặn việc ký trước rồi giữ lại để dùng sau. Hyperliquid chấp nhận nonce cũ tới khoảng 2 ngày, nên nếu Signer không kiểm tra thì một chữ ký có thể bị giữ lại và dùng rất lâu sau đó.
+- **Margin không bán khống.** SELL không được `MARGIN_BUY` / `AUTO_BORROW_REPAY`; `margin_borrow_repay` không `BORROW` tài sản gốc (vd. BTC). Đóng vị thế SELL vẫn không giới hạn `quantity` (có thể lớn hơn `max_qty`).
 
 Ngoài các quy tắc trên, Signer không kiểm tra gì thêm.
 - `price`, `p`, `triggerPrice`, `tif`, `c`, `newClientOrderId`… đều do BE chịu trách nhiệm.
@@ -386,7 +393,7 @@ Khi lỗi, Signer **không bao giờ trả về chữ ký**.
 | 401 | `UNAUTHENTICATED` | `key_id` không tồn tại hoặc không có section trong config, IP không nằm trong `allowed_ips` của key, hoặc HMAC sai / thiếu / quá cũ |
 | 403 | `OP_NOT_ALLOWED` | `op` không nằm trong 14 thao tác được phép |
 | 403 | `OP_MISMATCH` | Payload không khớp với `op` đã khai báo |
-| 403 | `PARAM_NOT_ALLOWED` | Có tham số nằm ngoài whitelist, hoặc `newOrderRespType` / `priceProtect` có giá trị khác giá trị được phép |
+| 403 | `PARAM_NOT_ALLOWED` | Có tham số nằm ngoài whitelist; `newOrderRespType` / `priceProtect` sai giá trị; margin: `type` / `side` / `sideEffectType` / `autoRepayAtCancel` sai, hoặc `BORROW` tài sản gốc |
 | 403 | `SYMBOL_NOT_ALLOWED` | Symbol / asset không có trong section của key |
 | 403 | `TOO_MANY_ORDERS` | Mảng `orders` của Hyperliquid không có đúng 1 lệnh |
 | 403 | `QTY_EXCEEDS_LIMIT` | Khối lượng `≤ 0` (`< 0` với lệnh `positionTpsl`), `≥ max_qty` của symbol (trừ lệnh reduce-only), hoặc không đọc được thành số. Với `sub_account_transfer` / `earn_transfer`: `usd` / `amount` không hợp lệ |
