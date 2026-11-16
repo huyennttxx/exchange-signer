@@ -175,7 +175,8 @@ class ServerTest(unittest.TestCase):
         p = hl("earn_transfer")
         p["action"]["operation"] = "borrow"
         status, _, body = self.sign(HL_ID, "earn_transfer", p)
-        self.assertEqual((status, body["error"]), (403, "PARAM_NOT_ALLOWED"))
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["signature"], hyperliquid.sign(SECP256K1_KEY, p["action"], NOW, True))
 
     def test_hyperliquid_create_sub_account(self):
         from signer.venues import hyperliquid
@@ -183,9 +184,12 @@ class ServerTest(unittest.TestCase):
         status, _, body = self.sign(HL_ID, "create_sub_account", p)
         self.assertEqual(status, 200, body)
         self.assertEqual(body["signature"], hyperliquid.sign(SECP256K1_KEY, p["action"], NOW, True))
-        p["vaultAddress"] = "0x" + "ab" * 20
+        vault = "0x" + "ab" * 20
+        p["vaultAddress"] = vault
         status, _, body = self.sign(HL_ID, "create_sub_account", p)
-        self.assertEqual((status, body["error"]), (403, "PARAM_NOT_ALLOWED"))
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["signature"],
+                         hyperliquid.sign(SECP256K1_KEY, p["action"], NOW, True, vault))
 
     def test_binance_create_sub_account_not_supported(self):
         status, _, body = self.sign(BINANCE_ID, "create_sub_account", bn(**BN["place_order"]))

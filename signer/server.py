@@ -102,7 +102,7 @@ class Signer:
         return self.state.keys
 
     def sign(self, body: bytes, client_ip: str, headers) -> dict:
-        """IP allowlist + HMAC(key_id) → venue của key → parse payload → khớp op → whitelist → rủi ro → ký."""
+        """IP allowlist + HMAC(key_id) → venue của key → parse payload → khớp op → rủi ro (place) → ký."""
         st = self.state
         req = parse_body(body)
         now_ms = self.clock()

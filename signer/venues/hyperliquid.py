@@ -1,6 +1,5 @@
 import configparser
 import os
-import re
 
 import msgpack
 from coincurve import PrivateKey
@@ -12,28 +11,8 @@ from signer.policy import Rule
 
 ASSETS_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hyperliquid_assets.ini")
 
-ALLOWED_PAYLOAD = ("action", "nonce", "vaultAddress")
-ALLOWED_ORDER_ACTION = ("type", "orders", "grouping")
-ALLOWED_ORDER = ("a", "b", "p", "s", "r", "t", "c")
-ALLOWED_LIMIT = ("tif",)
-ALLOWED_TRIGGER = ("isMarket", "triggerPx", "tpsl")
-ALLOWED_CANCEL_ACTION = ("type", "cancels")
-ALLOWED_CANCEL = ("asset", "cloid")
-ALLOWED_LEVERAGE_ACTION = ("type", "asset", "isCross", "leverage")
-# Chuyển giữa master và sub-account: USDC perp (usd = số nguyên, đơn vị 1e-6 USDC) và token spot
-ALLOWED_SUB_TRANSFER_ACTION = ("type", "subAccountUser", "isDeposit", "usd")
-ALLOWED_SUB_SPOT_TRANSFER_ACTION = ("type", "subAccountUser", "isDeposit", "token", "amount")
-MAX_UINT64 = 2**64 - 1
-# Gửi / rút USDC Earn (money market của HyperCore). Không ký borrow / repay
-ALLOWED_EARN_ACTION = ("type", "operation", "token", "amount")
-EARN_OPERATIONS = ("supply", "withdraw")
-# Tạo sub-account mới dưới master: chỉ có tên, không chuyển tiền
-ALLOWED_CREATE_SUB_ACTION = ("type", "name")
-MAX_SUB_NAME_LEN = 64
-
-_ADDRESS_RE = re.compile(r"0x[0-9a-fA-F]{40}")
-_TOKEN_RE = re.compile(r"[A-Za-z0-9]+:0x[0-9a-fA-F]{32}")  # <tên>:<token id>, ví dụ USDC:0x6d1e…
-
+# Op đặt lệnh: kiểm asset + qty (r = true = đóng → bỏ qty). Mọi op khác chỉ khớp op.
+PLACE_OPS = ("place_order", "place_conditional")
 
 _asset_tables: dict[str, dict[str, int]] = {}
 
@@ -103,70 +82,6 @@ def _list(where: str, x) -> list:
     return x
 
 
-def _check_order(i: int, order) -> None:
-    where = f"orders[{i}]"
-    policy.check_params(where, _obj(where, order), ALLOWED_ORDER)
-    t = _obj(f"{where}.t", order.get("t"))
-    policy.check_params(f"{where}.t", t, ("limit", "trigger"))
-    if len(t) != 1:
-        raise Reject("INVALID_REQUEST", f"{where}.t must have exactly one of limit, trigger")
-    if "limit" in t:
-        policy.check_params(f"{where}.t.limit", _obj(f"{where}.t.limit", t["limit"]), ALLOWED_LIMIT)
-    else:
-        policy.check_params(f"{where}.t.trigger", _obj(f"{where}.t.trigger", t["trigger"]), ALLOWED_TRIGGER)
-
-
-def _check_sub_account_transfer(action: dict) -> None:
-    """Chỉ chuyển giữa master và sub-account của chính nó: sàn từ chối subAccountUser không phải sub của master."""
-    spot = action["type"] == "subAccountSpotTransfer"
-    policy.check_params("action", action, ALLOWED_SUB_SPOT_TRANSFER_ACTION if spot else ALLOWED_SUB_TRANSFER_ACTION)
-    user = action.get("subAccountUser")
-    if not (isinstance(user, str) and _ADDRESS_RE.fullmatch(user)):
-        raise Reject("INVALID_REQUEST", f"subAccountUser {user!r} must be 0x + 40 hex characters")
-    if type(action.get("isDeposit")) is not bool:
-        raise Reject("INVALID_REQUEST", f"isDeposit {action.get('isDeposit')!r} must be true or false")
-    if spot:
-        token = action.get("token")
-        if not (isinstance(token, str) and _TOKEN_RE.fullmatch(token)):
-            raise Reject("INVALID_REQUEST", f"token {token!r} must be <name>:0x + 32 hex characters")
-        # amount là chuỗi số thập phân như SDK gửi (str(amount))
-        if not isinstance(action.get("amount"), str):
-            raise Reject("QTY_EXCEEDS_LIMIT", f"amount {action.get('amount')!r} must be a decimal string")
-        policy.check_qty(action["amount"], None)
-    else:
-        usd = action.get("usd")
-        if type(usd) is not int or not 0 < usd <= MAX_UINT64:
-            raise Reject("QTY_EXCEEDS_LIMIT", f"usd {usd!r} must be an integer > 0 (units of 1e-6 USDC)")
-
-
-def _check_earn(action: dict) -> None:
-    """borrowLend chỉ với supply / withdraw, mọi token; amount = null nghĩa là toàn bộ."""
-    policy.check_params("action", action, ALLOWED_EARN_ACTION)
-    operation = action.get("operation")
-    if operation not in EARN_OPERATIONS:  # borrow, repay: không ký
-        raise Reject("PARAM_NOT_ALLOWED", f"operation {operation!r} must be one of {', '.join(EARN_OPERATIONS)}")
-    token = action.get("token")
-    # Chỉ số token của sàn (0 = USDC); không giới hạn token nào
-    if type(token) is not int or not 0 <= token <= MAX_UINT64:
-        raise Reject("INVALID_REQUEST", f"token {token!r} must be an integer >= 0 (token index, 0 = USDC)")
-    if "amount" not in action:
-        raise Reject("INVALID_REQUEST", "amount is required (decimal string, or null for all)")
-    amount = action["amount"]
-    if amount is not None:
-        if not isinstance(amount, str):
-            raise Reject("QTY_EXCEEDS_LIMIT", f"amount {amount!r} must be a decimal string or null")
-        policy.check_qty(amount, None)
-
-
-def _check_create_sub_account(action: dict) -> None:
-    policy.check_params("action", action, ALLOWED_CREATE_SUB_ACTION)
-    name = action.get("name")
-    if not (isinstance(name, str) and 0 < len(name) <= MAX_SUB_NAME_LEN and name.isprintable()
-            and name == name.strip()):
-        raise Reject("INVALID_REQUEST", f"name {name!r} must be 1..{MAX_SUB_NAME_LEN} printable characters, "
-                                        "no leading / trailing spaces")
-
-
 def verify(op: str, payload, rule: Rule, max_age_ms: int, now_ms: int) -> None:
     payload = _obj("payload", payload)
     action = _obj("payload.action", payload.get("action"))
@@ -174,61 +89,18 @@ def verify(op: str, payload, rule: Rule, max_age_ms: int, now_ms: int) -> None:
     if op not in detect_op(action):
         raise Reject("OP_MISMATCH", f"action type {action.get('type')!r} / grouping {action.get('grouping')!r} is not {op}")
 
-    policy.check_params("payload", payload, ALLOWED_PAYLOAD)
+    if op not in PLACE_OPS:
+        return
 
-    if op in ("place_order", "place_conditional"):
-        policy.check_params("action", action, ALLOWED_ORDER_ACTION)
-        orders = _list("action.orders", action.get("orders"))
-        for i, order in enumerate(orders):
-            _check_order(i, order)
-        if len(orders) != 1:
-            raise Reject("TOO_MANY_ORDERS", f"orders must contain exactly 1 order, got {len(orders)}")
-        order = orders[0]
+    orders = _list("action.orders", action.get("orders"))
+    if not orders:
+        raise Reject("INVALID_REQUEST", "action.orders must not be empty")
+    for i, order in enumerate(orders):
+        order = _obj(f"orders[{i}]", order)
         policy.check_asset(order.get("a"), rule.allowed)
-        # Lệnh reduce-only (r = true) chỉ giảm vị thế → không giới hạn khối lượng.
-        # positionTpsl: s = 0 nghĩa là đóng cả vị thế
-        policy.check_qty(order.get("s"), None if order.get("r") is True else rule.allowed[order["a"]],
-                         allow_zero=op == "place_conditional")
-        if op == "place_conditional" and not (order.get("r") is True and "trigger" in order["t"]):
-            raise Reject("MUST_CLOSE_POSITION", "conditional order must have r = true and t.trigger")
-    elif op in ("cancel_order", "cancel_conditional"):
-        policy.check_params("action", action, ALLOWED_CANCEL_ACTION)
-        cancels = _list("action.cancels", action.get("cancels"))
-        if not cancels:
-            raise Reject("INVALID_REQUEST", "cancels must not be empty")
-        for i, c in enumerate(cancels):
-            policy.check_params(f"cancels[{i}]", _obj(f"cancels[{i}]", c), ALLOWED_CANCEL)
-        for c in cancels:
-            policy.check_asset(c.get("asset"), rule.allowed)
-    elif op == "sub_account_transfer":
-        _check_sub_account_transfer(action)
-        # Chuyển tiền ký bằng tài khoản master; vaultAddress không có nghĩa ở đây
-        if payload.get("vaultAddress") is not None:
-            raise Reject("PARAM_NOT_ALLOWED", "vaultAddress is not allowed for sub_account_transfer")
-    elif op == "earn_transfer":
-        _check_earn(action)
-    elif op == "create_sub_account":
-        _check_create_sub_account(action)
-        # Sub-account tạo dưới tài khoản master đã ký; không tạo được từ sub-account / vault
-        if payload.get("vaultAddress") is not None:
-            raise Reject("PARAM_NOT_ALLOWED", "vaultAddress is not allowed for create_sub_account")
-    else:
-        policy.check_params("action", action, ALLOWED_LEVERAGE_ACTION)
-        policy.check_asset(action.get("asset"), rule.allowed)
-        if action.get("isCross") is not True:
-            raise Reject("LEVERAGE_EXCEEDS_LIMIT", "isCross must be true")
-        policy.check_leverage(action.get("leverage"), rule.max_leverage)
-
-    vault = payload.get("vaultAddress")
-    if vault is not None and not (isinstance(vault, str) and _ADDRESS_RE.fullmatch(vault)):
-        raise Reject("INVALID_REQUEST", f"vaultAddress {vault!r} must be null or 0x + 40 hex characters")
-
-    policy.check_fresh("nonce", payload.get("nonce"), now_ms, max_age_ms)
-
-    try:
-        msgpack.packb(action)
-    except (OverflowError, TypeError, ValueError) as e:
-        raise Reject("INVALID_REQUEST", f"action cannot be encoded: {e}")
+        # r = true: lệnh giảm / đóng vị thế → không giới hạn khối lượng
+        if order.get("r") is not True:
+            policy.check_qty(order.get("s"), rule.allowed[order["a"]], allow_zero=False)
 
 
 def connection_id(action: dict, nonce: int, vault_address: str | None = None) -> bytes:

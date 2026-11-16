@@ -55,9 +55,6 @@ class PolicyTest(unittest.TestCase):
             with self.subTest(op=op):
                 self.ok(op)
 
-    def test_recv_window_optional(self):
-        self.ok("place_order", recvWindow=None)
-
     def test_op_mismatch(self):
         self.rejects("OP_MISMATCH", "set_leverage", bn(**BN["place_order"]))
         self.rejects("OP_MISMATCH", "place_order", bn(**BN["place_conditional"]))
@@ -72,17 +69,21 @@ class PolicyTest(unittest.TestCase):
         self.rejects("INVALID_REQUEST", "place_order", "symbol")
         self.rejects("INVALID_REQUEST", "place_order", bn(**BN["place_order"]) + "&quantity=1")
 
-    def test_param_not_allowed(self):
-        self.rejects("PARAM_NOT_ALLOWED", "place_order", batchOrders="[]")
-        self.rejects("PARAM_NOT_ALLOWED", "place_order", stopPrice="1")
-        self.rejects("PARAM_NOT_ALLOWED", "cancel_order", orderId="1")
-        self.rejects("PARAM_NOT_ALLOWED", "place_conditional", quantity="1")
-        self.rejects("PARAM_NOT_ALLOWED", "set_leverage", marginType="ISOLATED")
+    def test_op_only_ignores_extra_params(self):
+        # Ngoài place_*: chỉ khớp op — không whitelist / freshness / leverage
+        self.ok("cancel_order", orderId="1", timestamp=str(NOW - 10_001))
+        self.ok("set_leverage", marginType="ISOLATED", leverage="99")
+        self.ok("place_order", batchOrders="[]", stopPrice="1", newOrderRespType="ACK",
+                timestamp=str(NOW - 10_001))
+        self.ok("place_conditional", quantity="1", priceProtect="true", type="STOP")
 
     def test_symbol(self):
         self.rejects("SYMBOL_NOT_ALLOWED", "place_order", symbol="ETHUSDT")
-        self.rejects("SYMBOL_NOT_ALLOWED", "set_leverage", symbol="btcusdt")
         self.rejects("SYMBOL_NOT_ALLOWED", "place_order", symbol=None)
+        self.rejects("SYMBOL_NOT_ALLOWED", "place_conditional", symbol="ETHUSDT")
+        # Op không phải place: không check symbol
+        self.ok("set_leverage", symbol="btcusdt")
+        self.ok("cancel_order", symbol="ETHUSDT")
 
     def test_rule_per_key(self):
         rule = Rule(max_leverage=10, allowed={"BTCUSDC": Decimal("0.01"), "ETHUSDT": Decimal("1")})
@@ -91,8 +92,7 @@ class PolicyTest(unittest.TestCase):
         self.rejects("QTY_EXCEEDS_LIMIT", "place_order", rule=rule, symbol="BTCUSDC", quantity="0.5")
         self.rejects("SYMBOL_NOT_ALLOWED", "place_order", rule=rule)  # BTCUSDT
         self.rejects("SYMBOL_NOT_ALLOWED", "place_conditional", rule=rule)
-        self.ok("set_leverage", rule, symbol="ETHUSDT", leverage="10")
-        self.rejects("LEVERAGE_EXCEEDS_LIMIT", "set_leverage", rule=rule, symbol="ETHUSDT", leverage="11")
+        self.ok("set_leverage", rule, symbol="ETHUSDT", leverage="11")
 
     def test_qty(self):
         for q in ("0.01", "0.02", "0", "-0.001", "NaN", "Infinity", "abc", "", None):
@@ -100,44 +100,16 @@ class PolicyTest(unittest.TestCase):
                 self.rejects("QTY_EXCEEDS_LIMIT", "place_order", quantity=q)
         self.ok("place_order", quantity="0.0099")
 
-    def test_reduce_only_qty_unlimited(self):
+    def test_close_skips_qty(self):
         self.ok("place_order", reduceOnly="true", quantity="5")
-        for q in ("0", "-1", "NaN", "abc"):
-            with self.subTest(q=q):
-                self.rejects("QTY_EXCEEDS_LIMIT", "place_order", reduceOnly="true", quantity=q)
+        self.ok("place_order", reduceOnly="true", quantity="NaN")  # lệnh đóng: không check qty
         self.rejects("QTY_EXCEEDS_LIMIT", "place_order", reduceOnly="false", quantity="5")
-
-    def test_fixed_value_params(self):
-        self.ok("place_order", newOrderRespType="RESULT")
-        self.ok("place_conditional", priceProtect="false")
-        self.ok("place_conditional", priceProtect="FALSE")
-        self.rejects("PARAM_NOT_ALLOWED", "place_order", newOrderRespType="ACK")
-        self.rejects("PARAM_NOT_ALLOWED", "place_conditional", priceProtect="true")
-        self.rejects("PARAM_NOT_ALLOWED", "place_conditional", newOrderRespType="RESULT")
-        self.rejects("PARAM_NOT_ALLOWED", "place_order", priceProtect="false")
-
-    def test_leverage(self):
-        for lev in ("0", "6", "2.5", "3.0", "-1", "NaN", "x", ""):
-            with self.subTest(lev=lev):
-                self.rejects("LEVERAGE_EXCEEDS_LIMIT", "set_leverage", leverage=lev)
-        self.ok("set_leverage", leverage="5")
-        self.ok("set_leverage", leverage="1")
-
-    def test_must_close_position(self):
-        self.rejects("MUST_CLOSE_POSITION", "place_conditional", closePosition="false")
-        self.rejects("MUST_CLOSE_POSITION", "place_conditional", closePosition=None)
-        self.rejects("MUST_CLOSE_POSITION", "place_conditional", type="STOP")
-        self.ok("place_conditional", type="TAKE_PROFIT_MARKET")
-
-    def test_stale(self):
-        self.rejects("STALE_PAYLOAD", "place_order", timestamp=str(NOW - 10_001))
-        self.rejects("STALE_PAYLOAD", "place_order", timestamp=str(NOW + 10_001))
-        self.rejects("STALE_PAYLOAD", "place_order", timestamp=None)
-        self.rejects("STALE_PAYLOAD", "place_order", timestamp="1e12")
-        self.rejects("STALE_PAYLOAD", "place_order", recvWindow="20001")
-        self.rejects("STALE_PAYLOAD", "place_order", recvWindow="0")
-        self.ok("place_order", timestamp=str(NOW - 10_000))
-        self.ok("place_order", recvWindow="20000")
+        # place_conditional đóng vị thế: không cần quantity
+        self.ok("place_conditional", closePosition="true")
+        self.ok("place_conditional", closePosition="true", quantity="999")
+        # Không phải đóng → cần quantity hợp lệ
+        self.rejects("QTY_EXCEEDS_LIMIT", "place_conditional", closePosition="false", quantity=None)
+        self.ok("place_conditional", closePosition="false", quantity="0.0099")
 
     def test_margin_place_symbol_qty_from_config(self):
         self.ok("place_margin_order")

@@ -1,5 +1,4 @@
 import base64
-import re
 from urllib.parse import parse_qsl, quote
 
 from Crypto.PublicKey import ECC
@@ -9,34 +8,14 @@ from signer import policy
 from signer.errors import Reject
 from signer.policy import Rule
 
-DEFAULT_RECV_WINDOW_MS = 5000
-MAX_RECV_WINDOW_MS = 20000  # chữ ký Binance hết hạn tối đa 20 s sau timestamp
-CONDITIONAL_TYPES = ("STOP_MARKET", "TAKE_PROFIT_MARKET")
-# Tham số chỉ được phép với đúng một giá trị
-FIXED_VALUES = {"newOrderRespType": ("RESULT",), "priceProtect": ("false", "FALSE")}
-_DIGITS = re.compile(r"[0-9]{1,19}")
+# Op đặt lệnh: kiểm symbol + qty (lệnh đóng thì bỏ qty). Mọi op khác chỉ khớp op.
+PLACE_OPS = ("place_order", "place_conditional", "place_margin_order")
 
 # Chuyển thế chấp (universal transfer)
 TRANSFER_TYPES = (
     "MAIN_MARGIN", "MARGIN_MAIN", "MARGIN_ISOLATEDMARGIN",
     "ISOLATEDMARGIN_MARGIN", "ISOLATEDMARGIN_ISOLATEDMARGIN",
 )
-
-# Op margin: chỉ khớp op (trừ place_margin_order còn check symbol/qty)
-MARGIN_OP_ONLY = (
-    "cancel_margin_order", "margin_transfer", "set_margin_leverage",
-    "enable_isolated", "margin_borrow_repay",
-)
-
-ALLOWED = {
-    "place_order": ("symbol", "side", "type", "quantity", "price", "timeInForce", "reduceOnly",
-                    "newClientOrderId", "newOrderRespType", "recvWindow", "timestamp"),
-    "cancel_order": ("symbol", "origClientOrderId", "recvWindow", "timestamp"),
-    "place_conditional": ("algoType", "symbol", "side", "type", "triggerPrice", "closePosition",
-                          "workingType", "priceProtect", "clientAlgoId", "recvWindow", "timestamp"),
-    "cancel_conditional": ("symbol", "clientAlgoId", "recvWindow", "timestamp"),
-    "set_leverage": ("symbol", "leverage", "recvWindow", "timestamp"),
-}
 
 
 def parse(payload) -> dict[str, str]:
@@ -51,11 +30,6 @@ def parse(payload) -> dict[str, str]:
         # Tham số lặp lại thì không chắc sàn lấy giá trị nào → không ký
         raise Reject("INVALID_REQUEST", "duplicate parameter")
     return params
-
-
-def _int(raw):
-    """Chuỗi chữ số → int; giá trị khác giữ nguyên để các hàm check báo lỗi kèm giá trị gốc."""
-    return int(raw) if isinstance(raw, str) and _DIGITS.fullmatch(raw) else raw
 
 
 def detect_op(params: dict) -> str | None:
@@ -87,6 +61,15 @@ def detect_op(params: dict) -> str | None:
     return None
 
 
+def _is_close(op: str, params: dict) -> bool:
+    if op == "place_order":
+        return params.get("reduceOnly") == "true"
+    if op == "place_conditional":
+        return params.get("closePosition") == "true"
+    # place_margin_order: SELL = đóng vị thế
+    return params.get("side") == "SELL"
+
+
 def verify(op: str, payload, rule: Rule, max_age_ms: int, now_ms: int) -> None:
     params = parse(payload)
 
@@ -94,48 +77,16 @@ def verify(op: str, payload, rule: Rule, max_age_ms: int, now_ms: int) -> None:
     if actual != op:
         raise Reject("OP_MISMATCH", f"payload is {actual or 'unrecognised'}, not {op}")
 
-    if op == "place_margin_order":
-        symbol = params.get("symbol")
-        if symbol not in rule.allowed:
-            raise Reject("SYMBOL_NOT_ALLOWED",
-                         "symbol is required" if symbol is None else
-                         f"symbol {symbol!r} is not allowed for this key")
-        # Đóng vị thế (SELL) → không giới hạn quantity; vẫn dùng max_qty trong config khi mở/tăng
-        if params.get("side") != "SELL":
-            policy.check_qty(params.get("quantity"), rule.allowed[symbol])
+    if op not in PLACE_OPS:
         return
 
-    if op in MARGIN_OP_ONLY:
-        return
-
-    policy.check_params(op, params, ALLOWED[op])
-    for k, values in FIXED_VALUES.items():
-        if k in params and params[k] not in values:
-            raise Reject("PARAM_NOT_ALLOWED", f"{k} {params[k]!r} must be {' or '.join(values)}")
-
-    if "symbol" in params and params["symbol"] not in rule.allowed:
-        raise Reject("SYMBOL_NOT_ALLOWED", f"symbol {params['symbol']!r} is not allowed for this key")
-    if op == "place_order" and "symbol" not in params:
-        # Cần symbol để biết max_qty
-        raise Reject("SYMBOL_NOT_ALLOWED", "symbol is required")
-
-    if op == "place_order":
-        # Lệnh reduce-only chỉ giảm vị thế → không giới hạn khối lượng
-        reduce_only = params.get("reduceOnly") == "true"
-        policy.check_qty(params.get("quantity"), None if reduce_only else rule.allowed[params["symbol"]])
-    elif op == "place_conditional":
-        if params.get("closePosition") != "true":
-            raise Reject("MUST_CLOSE_POSITION", "closePosition must be true")
-        if params.get("type") not in CONDITIONAL_TYPES:
-            raise Reject("MUST_CLOSE_POSITION", f"type must be one of {', '.join(CONDITIONAL_TYPES)}")
-    elif op == "set_leverage":
-        policy.check_leverage(_int(params["leverage"]), rule.max_leverage)
-
-    policy.check_fresh("timestamp", _int(params.get("timestamp")), now_ms, max_age_ms)
-    # Không gửi recvWindow → sàn dùng mặc định 5000 ms
-    rw = _int(params.get("recvWindow", str(DEFAULT_RECV_WINDOW_MS)))
-    if type(rw) is not int or not (0 < rw <= MAX_RECV_WINDOW_MS):
-        raise Reject("STALE_PAYLOAD", f"recvWindow {rw!r} must be > 0 and <= {MAX_RECV_WINDOW_MS}")
+    symbol = params.get("symbol")
+    if symbol not in rule.allowed:
+        raise Reject("SYMBOL_NOT_ALLOWED",
+                     "symbol is required" if symbol is None else
+                     f"symbol {symbol!r} is not allowed for this key")
+    if not _is_close(op, params):
+        policy.check_qty(params.get("quantity"), rule.allowed[symbol])
 
 
 def sign(seed: bytes, payload: str) -> str:
