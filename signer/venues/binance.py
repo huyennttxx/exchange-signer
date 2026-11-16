@@ -16,6 +16,18 @@ CONDITIONAL_TYPES = ("STOP_MARKET", "TAKE_PROFIT_MARKET")
 FIXED_VALUES = {"newOrderRespType": ("RESULT",), "priceProtect": ("false", "FALSE")}
 _DIGITS = re.compile(r"[0-9]{1,19}")
 
+# Chuyển thế chấp (universal transfer)
+TRANSFER_TYPES = (
+    "MAIN_MARGIN", "MARGIN_MAIN", "MARGIN_ISOLATEDMARGIN",
+    "ISOLATEDMARGIN_MARGIN", "ISOLATEDMARGIN_ISOLATEDMARGIN",
+)
+
+# Op margin: chỉ khớp op (trừ place_margin_order còn check symbol/qty)
+MARGIN_OP_ONLY = (
+    "cancel_margin_order", "margin_transfer", "set_margin_leverage",
+    "enable_isolated", "margin_borrow_repay",
+)
+
 ALLOWED = {
     "place_order": ("symbol", "side", "type", "quantity", "price", "timeInForce", "reduceOnly",
                     "newClientOrderId", "newOrderRespType", "recvWindow", "timestamp"),
@@ -47,17 +59,31 @@ def _int(raw):
 
 
 def detect_op(params: dict) -> str | None:
-    # Thứ tự quan trọng: algoType trước type, origClientOrderId/clientAlgoId trước leverage
+    # Thứ tự quan trọng: marker margin / transfer trước futures
+    if "maxLeverage" in params:
+        return "set_margin_leverage"
+    t = params.get("type")
+    if t in TRANSFER_TYPES:
+        return "margin_transfer"
+    if t in ("BORROW", "REPAY"):
+        return "margin_borrow_repay"
+    if "sideEffectType" in params or "autoRepayAtCancel" in params:
+        return "place_margin_order"
+    if "isIsolated" in params and "type" in params:
+        return "place_margin_order"
     if "algoType" in params:
         return "place_conditional"
     if "type" in params:
         return "place_order"
     if "origClientOrderId" in params:
-        return "cancel_order"
+        return "cancel_margin_order" if "isIsolated" in params else "cancel_order"
     if "clientAlgoId" in params:
         return "cancel_conditional"
     if "leverage" in params:
         return "set_leverage"
+    # Bật isolated: symbol (+ timestamp/recvWindow), không có marker lệnh / đòn bẩy
+    if "symbol" in params:
+        return "enable_isolated"
     return None
 
 
@@ -67,6 +93,20 @@ def verify(op: str, payload, rule: Rule, max_age_ms: int, now_ms: int) -> None:
     actual = detect_op(params)
     if actual != op:
         raise Reject("OP_MISMATCH", f"payload is {actual or 'unrecognised'}, not {op}")
+
+    if op == "place_margin_order":
+        symbol = params.get("symbol")
+        if symbol not in rule.allowed:
+            raise Reject("SYMBOL_NOT_ALLOWED",
+                         "symbol is required" if symbol is None else
+                         f"symbol {symbol!r} is not allowed for this key")
+        # Đóng vị thế (SELL) → không giới hạn quantity; vẫn dùng max_qty trong config khi mở/tăng
+        if params.get("side") != "SELL":
+            policy.check_qty(params.get("quantity"), rule.allowed[symbol])
+        return
+
+    if op in MARGIN_OP_ONLY:
+        return
 
     policy.check_params(op, params, ALLOWED[op])
     for k, values in FIXED_VALUES.items():

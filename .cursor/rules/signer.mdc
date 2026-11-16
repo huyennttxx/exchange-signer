@@ -1,0 +1,27 @@
+---
+description: Ràng buộc cốt lõi của dự án Signer (dịch vụ ký lệnh Binance / Hyperliquid)
+alwaysApply: true
+---
+
+# Signer — rule cho AI
+
+Đọc `docs/HANDOVER.md` để có bức tranh tổng thể. Đặc tả API (nguồn sự thật): `docs/signer-api.md`. Thiết kế: `docs/signer-impl.md`.
+
+## Bảo mật (bắt buộc)
+- KHÔNG đọc, in, hay trích nội dung `config.ini`, `keystore.json`, `*.keystore.json`. Dùng `config.example.ini` làm mẫu.
+- Không log private key, HMAC secret, passphrase, hay payload kèm thông tin key.
+- Fail closed: field / tham số lạ, key JSON lặp, NaN, sai kiểu → `Reject`. Không bao giờ bỏ qua.
+- Policy kiểm tra trên dữ liệu đã parse, nhưng ký đúng dữ liệu gốc (Binance: chuỗi query gốc; Hyperliquid: giữ thứ tự key).
+- Mỗi request một lệnh. Không thêm batch, cancel-all, rút tiền, `usdSend`, `approveAgent`, borrow/repay… trừ khi người dùng yêu cầu rõ ràng (đó là quyết định nghiệp vụ).
+
+## Phụ thuộc
+- Runtime chỉ có `pycryptodome`, `coincurve`, `msgpack` (pin cứng trong `requirements.txt`). Ưu tiên thư viện chuẩn; hỏi trước khi thêm gói.
+- `hyperliquid-python-sdk` chỉ dùng trong test (`requirements-test.txt`).
+
+## Thêm / sửa op
+Làm đủ trong cùng một thay đổi: `signer/policy.py` (`OPS`), `signer/venues/<venue>.py` (`ALLOWED_…`, `detect_op`, `_check_…`, `verify`), `tests/helpers.py`, `tests/test_<venue>.py` (kèm so chữ ký với SDK cho Hyperliquid), `tests/test_server.py`, `docs/signer-api.md` (bảng op + số lượng op, whitelist, quy tắc rủi ro, ví dụ, bảng lỗi), `README.md`. Mẫu: commit `a3fe6a8`.
+
+## Quy ước
+- Docs và comment code: tiếng Việt. Message lỗi trả cho BE: tiếng Anh.
+- Lỗi đi qua `signer.errors.Reject(code, message)`; mã lỗi mới phải thêm vào `STATUS` trong `signer/errors.py` và bảng lỗi trong `docs/signer-api.md`.
+- Test: `unittest`, chạy `.venv/Scripts/python -m unittest discover -s tests -t .` (Linux/macOS: `.venv/bin/python`). Phải pass hết trước khi coi là xong.

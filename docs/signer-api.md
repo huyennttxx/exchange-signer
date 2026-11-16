@@ -37,8 +37,9 @@ Mọi path khác trả `404`.
 - Mỗi key thuộc đúng **một sàn**. Sàn của một request được suy ra từ `key_id`.
 - **Nạp và xoá key chỉ làm thao tác trên máy Signer**, không có API cho việc này. BE không thể thêm, đổi hay đọc key.
 - **Mỗi key có IP allowlist và HMAC secret riêng** (xem [Xác thực](#xác-thực)).
-- **Key Binance chỉ bật quyền Futures**, tắt Spot và Withdraw.
+- **Key Binance futures** chỉ bật quyền Futures, tắt Spot và Withdraw.
   - Lý do: chữ ký Binance không bao gồm path. Nếu key có quyền Spot, một payload đặt lệnh futures có thể bị gửi sang endpoint spot.
+- **Key Binance margin** (op `place_margin_order`, …): cần quyền Spot & Margin (và loan/transfer nếu dùng); nên tách key khỏi key futures — xem [`signer-margin.md`](signer-margin.md).
 
 ---
 
@@ -135,7 +136,7 @@ Quy tắc `STALE_PAYLOAD` so `timestamp` / `nonce` với giờ của Signer, mà
 | Field | Mô tả |
 |---|---|
 | `key_id` | Key dùng để ký. Sàn được suy ra từ key |
-| `op` | Thao tác, một trong 5 giá trị ở [Thao tác được phép](#thao-tác-được-phép) |
+| `op` | Thao tác, một trong các giá trị ở [Thao tác được phép](#thao-tác-được-phép) |
 | `payload` | Nội dung cần ký, theo định dạng của sàn |
 
 ### Binance
@@ -194,28 +195,35 @@ BE gửi `POST /exchange` với body `{ "action", "nonce", "signature" }`, kèm 
 
 ## Thao tác được phép
 
-- `op` khác 8 giá trị dưới đây: `403 OP_NOT_ALLOWED`.
+- `op` khác 14 giá trị dưới đây: `403 OP_NOT_ALLOWED`.
 - Payload không khớp với `op` đã khai báo: `403 OP_MISMATCH`. Ví dụ khai `op = set_leverage` nhưng payload lại là lệnh đặt.
 
 | `op` | Endpoint của BE | Binance: payload phải có | Hyperliquid: payload phải có |
 |---|---|---|---|
-| `place_order` | `POST /v1/orders` | `type`, không có `algoType` (→ `POST /fapi/v1/order`) | `action.type = "order"`, `grouping = "na"` |
-| `cancel_order` | `DELETE /v1/orders/{client_order_id}` | `origClientOrderId` (→ `DELETE /fapi/v1/order`) | `action.type = "cancelByCloid"` |
+| `place_order` | `POST /v1/orders` | `type`, không có `algoType` / marker margin (→ `POST /fapi/v1/order`) | `action.type = "order"`, `grouping = "na"` |
+| `cancel_order` | `DELETE /v1/orders/{client_order_id}` | `origClientOrderId`, không có `isIsolated` (→ `DELETE /fapi/v1/order`) | `action.type = "cancelByCloid"` |
 | `place_conditional` | `POST /v1/conditional` | `algoType` (→ `POST /fapi/v1/algoOrder`) | `action.type = "order"`, `grouping = "positionTpsl"` |
 | `cancel_conditional` | `DELETE /v1/conditional/{client_algo_id}` | `clientAlgoId`, không có `algoType` (→ `DELETE /fapi/v1/algoOrder`) | `action.type = "cancelByCloid"` |
 | `set_leverage` | `POST /v1/leverage` | `leverage` (→ `POST /fapi/v1/leverage`) | `action.type = "updateLeverage"` |
 | `sub_account_transfer` | — | Không hỗ trợ (luôn `403 OP_MISMATCH`) | `action.type = "subAccountTransfer"` (USDC perp) hoặc `"subAccountSpotTransfer"` (token spot) |
 | `earn_transfer` | — | Không hỗ trợ (luôn `403 OP_MISMATCH`) | `action.type = "borrowLend"`, `operation` là `"supply"` hoặc `"withdraw"` |
 | `create_sub_account` | — | Không hỗ trợ (luôn `403 OP_MISMATCH`) | `action.type = "createSubAccount"` |
+| `place_margin_order` | — | `sideEffectType` / `autoRepayAtCancel` / (`isIsolated`+`type`) (→ `POST /sapi/v1/margin/order`) | Không hỗ trợ (`403 OP_MISMATCH`) |
+| `cancel_margin_order` | — | `origClientOrderId` + `isIsolated` (→ `DELETE /sapi/v1/margin/order`) | Không hỗ trợ |
+| `margin_transfer` | — | `type` ∈ `MAIN_MARGIN` / `MARGIN_MAIN` / … (→ `POST /sapi/v1/asset/transfer`) | Không hỗ trợ |
+| `set_margin_leverage` | — | `maxLeverage` (→ `POST /sapi/v1/margin/max-leverage`) | Không hỗ trợ |
+| `enable_isolated` | — | `symbol` không kèm marker lệnh khác (→ `POST /sapi/v1/margin/isolated/account`) | Không hỗ trợ |
+| `margin_borrow_repay` | — | `type` = `BORROW` / `REPAY` (→ `POST /sapi/v1/margin/borrow-repay`) | Không hỗ trợ |
+
+Chi tiết policy margin: [`signer-margin.md`](signer-margin.md).
 
 Không có trong danh sách, và **không bao giờ được ký**:
-- rút tiền, chuyển tiền ra ngoài hoặc giữa perp ↔ spot (`withdraw3`, `usdSend`, `spotSend`, `sendAsset`, `usdClassTransfer`, `vaultTransfer`). Chỉ chuyển giữa master và sub-account (`sub_account_transfer`) được ký;
+- rút tiền ra ngoài (`withdraw3`, `usdSend`, `spotSend`, `sendAsset`, …). Chuyển thế chấp margin (`margin_transfer`) và master ↔ sub-account Hyperliquid (`sub_account_transfer`) được ký;
 - sửa sub-account (`subAccountModify`). Chỉ tạo sub-account mới (`create_sub_account`) được ký;
 - vay và trả nợ trong Earn (`borrowLend` với `operation` = `borrow` / `repay`). Chỉ gửi / rút (`supply` / `withdraw`) được ký;
 - `approveAgent`, `approveBuilderFee`;
 - cancel-all, batch order;
-- đổi chế độ margin;
-- mọi lệnh spot.
+- đổi chế độ margin futures; lệnh spot thuần (không phải margin op ở trên).
 
 ---
 
@@ -237,6 +245,8 @@ Mỗi thao tác có một danh sách tham số được phép. **Có bất kỳ 
 | Chuyển master ↔ sub-account | — | `subAccountTransfer`: `type`, `subAccountUser`, `isDeposit`, `usd`. `subAccountSpotTransfer`: `type`, `subAccountUser`, `isDeposit`, `token`, `amount` |
 | Gửi / rút Earn | — | `action`: `type`, `operation`, `token`, `amount` |
 | Tạo sub-account | — | `action`: `type`, `name` |
+| Đặt lệnh margin | Không whitelist tham số. Chỉ kiểm `symbol` / `quantity` theo config (xem quy tắc rủi ro) | — |
+| Huỷ margin / chuyển thế chấp / đòn bẩy margin / bật isolated / borrow-repay | Không whitelist; chỉ khớp `op` | — |
 
 Với Hyperliquid, ngoài `action` thì `payload` chỉ được có thêm:
 - `nonce`
@@ -248,9 +258,9 @@ Field `expiresAfter` không được phép.
 
 | Quy tắc | Binance | Hyperliquid | Lỗi |
 |---|---|---|---|
-| Symbol | `symbol` là một symbol trong section của key (nếu có tham số `symbol`). `place_order` bắt buộc có `symbol` | Mọi `a` / `asset` là chỉ số asset của một symbol trong section của key (tra `<COIN>USDC` trong `signer/hyperliquid_assets.ini`) | `403 SYMBOL_NOT_ALLOWED` |
+| Symbol | `symbol` là một symbol trong section của key (nếu có tham số `symbol`). `place_order` và `place_margin_order` bắt buộc có `symbol`. Các op margin chỉ-khớp-op không kiểm symbol | Mọi `a` / `asset` là chỉ số asset của một symbol trong section của key (tra `<COIN>USDC` trong `signer/hyperliquid_assets.ini`) | `403 SYMBOL_NOT_ALLOWED` |
 | Số lệnh | Một payload là một lệnh (Binance không có batch trong whitelist) | `place_order` và `place_conditional`: mảng `orders` có đúng 1 phần tử | `403 TOO_MANY_ORDERS` |
-| Khối lượng | `0 < quantity < max_qty` của symbol đó. Lệnh `reduceOnly=true`: chỉ cần `quantity > 0` | `0 < s < max_qty` của symbol đó. Lệnh `r = true`: chỉ cần `s > 0`. `place_conditional` (`positionTpsl`): nhận thêm `s = 0` (đóng cả vị thế) | `403 QTY_EXCEEDS_LIMIT` |
+| Khối lượng | `0 < quantity < max_qty` của symbol đó. Lệnh `reduceOnly=true`: chỉ cần `quantity > 0`. `place_margin_order`: cùng hạn `max_qty` config; **`side=SELL` (đóng vị thế) không kiểm quantity** | `0 < s < max_qty` của symbol đó. Lệnh `r = true`: chỉ cần `s > 0`. `place_conditional` (`positionTpsl`): nhận thêm `s = 0` (đóng cả vị thế) | `403 QTY_EXCEEDS_LIMIT` |
 | Đòn bẩy | `1 ≤ leverage ≤ max_leverage` của key | `1 ≤ leverage ≤ max_leverage` của key, và `isCross = true` | `403 LEVERAGE_EXCEEDS_LIMIT` |
 | Lệnh bảo hiểm phải đóng vị thế | `closePosition = true`, `type` là `STOP_MARKET` hoặc `TAKE_PROFIT_MARKET` | Mọi lệnh có `r = true` và `t.trigger` | `403 MUST_CLOSE_POSITION` |
 | Chuyển master ↔ sub-account | — | `subAccountUser` là `0x` + 40 hex, `isDeposit` là `true` / `false`, `token` dạng `<tên>:0x` + 32 hex (sai thì `400 INVALID_REQUEST`). `usd` là số nguyên `> 0` (đơn vị 1e-6 USDC: `1000000` = 1 USDC); `amount` là chuỗi số thập phân `> 0` | `403 QTY_EXCEEDS_LIMIT` |
@@ -351,6 +361,15 @@ Giới hạn đi theo từng key, trong section `[key:<key_id>]` của `config.i
 
 Địa chỉ của sub-account mới nằm trong response của sàn (hoặc query `/info` với `{"type": "subAccounts", "user": <master>}`).
 
+### Margin Binance (chỉ Binance)
+
+- Đặt: `symbol=BTCUSDT&isIsolated=FALSE&side=BUY&type=LIMIT&timeInForce=GTC&quantity=0.005&price=60000&newClientOrderId=0x…&sideEffectType=MARGIN_BUY&autoRepayAtCancel=FALSE&recvWindow=2000&timestamp=…`
+- Huỷ: `symbol=BTCUSDT&isIsolated=FALSE&origClientOrderId=0x…&recvWindow=2000&timestamp=…`
+- Chuyển thế chấp: `type=MAIN_MARGIN&asset=USDC&amount=50&recvWindow=2000&timestamp=…`
+- Đòn bẩy cross: `maxLeverage=3&recvWindow=2000&timestamp=…`
+- Bật isolated: `symbol=BTCUSDT&recvWindow=2000&timestamp=…`
+- Vay/trả riêng: `asset=USDC&amount=10&type=REPAY&isIsolated=FALSE&recvWindow=2000&timestamp=…`
+
 ---
 
 ## Lỗi
@@ -365,7 +384,7 @@ Khi lỗi, Signer **không bao giờ trả về chữ ký**.
 |---|---|---|
 | 400 | `INVALID_REQUEST` | Body không phải JSON, hoặc `payload` không đọc được |
 | 401 | `UNAUTHENTICATED` | `key_id` không tồn tại hoặc không có section trong config, IP không nằm trong `allowed_ips` của key, hoặc HMAC sai / thiếu / quá cũ |
-| 403 | `OP_NOT_ALLOWED` | `op` không nằm trong 8 thao tác được phép |
+| 403 | `OP_NOT_ALLOWED` | `op` không nằm trong 14 thao tác được phép |
 | 403 | `OP_MISMATCH` | Payload không khớp với `op` đã khai báo |
 | 403 | `PARAM_NOT_ALLOWED` | Có tham số nằm ngoài whitelist, hoặc `newOrderRespType` / `priceProtect` có giá trị khác giá trị được phép |
 | 403 | `SYMBOL_NOT_ALLOWED` | Symbol / asset không có trong section của key |

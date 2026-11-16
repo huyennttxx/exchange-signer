@@ -1,0 +1,6 @@
+# Không cho Cursor index / gửi lên AI: dữ liệu bí mật của máy Signer
+config.ini
+keystore.json
+*.keystore.json
+.venv/
+.idea/

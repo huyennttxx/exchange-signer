@@ -127,6 +127,21 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 200, body)
         self.assertEqual(len(__import__("base64").b64decode(unquote(body["signature"]))), 64)
 
+    def test_binance_margin_ops(self):
+        for op in ("place_margin_order", "cancel_margin_order", "margin_transfer",
+                   "set_margin_leverage", "enable_isolated", "margin_borrow_repay"):
+            with self.subTest(op=op):
+                status, _, body = self.sign(BINANCE_ID, op, bn(**BN[op]))
+                self.assertEqual(status, 200, body)
+                self.assertEqual(len(__import__("base64").b64decode(unquote(body["signature"]))), 64)
+        # Đóng vị thế: quantity vượt max_qty vẫn ký
+        close = bn(**{**BN["place_margin_order"], "side": "SELL", "sideEffectType": "AUTO_REPAY",
+                      "quantity": "5"})
+        self.assertEqual(self.sign(BINANCE_ID, "place_margin_order", close)[0], 200)
+        # Hyperliquid không hỗ trợ op margin
+        status, _, body = self.sign(HL_ID, "place_margin_order", hl("place_order"))
+        self.assertEqual((status, body["error"]), (403, "OP_MISMATCH"))
+
     def test_hyperliquid_sign(self):
         status, _, body = self.sign(HL_ID, "place_order", hl("place_order"))
         self.assertEqual(status, 200, body)

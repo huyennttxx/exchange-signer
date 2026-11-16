@@ -63,6 +63,9 @@ class PolicyTest(unittest.TestCase):
         self.rejects("OP_MISMATCH", "place_order", bn(**BN["place_conditional"]))
         self.rejects("OP_MISMATCH", "cancel_order", bn(**BN["cancel_conditional"]))
         self.rejects("OP_MISMATCH", "place_order", "symbol=BTCUSDT&timestamp=1")
+        self.rejects("OP_MISMATCH", "place_order", bn(**BN["place_margin_order"]))
+        self.rejects("OP_MISMATCH", "cancel_order", bn(**BN["cancel_margin_order"]))
+        self.rejects("OP_MISMATCH", "set_leverage", bn(**BN["set_margin_leverage"]))
 
     def test_invalid_payload(self):
         self.rejects("INVALID_REQUEST", "place_order", "")
@@ -135,6 +138,33 @@ class PolicyTest(unittest.TestCase):
         self.rejects("STALE_PAYLOAD", "place_order", recvWindow="0")
         self.ok("place_order", timestamp=str(NOW - 10_000))
         self.ok("place_order", recvWindow="20000")
+
+    def test_margin_place_symbol_qty_from_config(self):
+        self.ok("place_margin_order")
+        self.rejects("SYMBOL_NOT_ALLOWED", "place_margin_order", symbol="ETHUSDT")
+        self.rejects("SYMBOL_NOT_ALLOWED", "place_margin_order", symbol=None)
+        self.rejects("QTY_EXCEEDS_LIMIT", "place_margin_order", quantity="0.01")
+        self.ok("place_margin_order", quantity="0.0099")
+        # Tham số lạ / stale: margin place không check (chỉ symbol + qty)
+        self.ok("place_margin_order", stopPrice="1", timestamp=str(NOW - 10_001))
+
+    def test_margin_close_skips_qty(self):
+        # Đóng vị thế (SELL): không giới hạn quantity theo config
+        self.ok("place_margin_order", side="SELL", sideEffectType="AUTO_REPAY", quantity="5")
+        self.rejects("SYMBOL_NOT_ALLOWED", "place_margin_order", side="SELL", symbol="ETHUSDT",
+                     sideEffectType="AUTO_REPAY", quantity="5")
+
+    def test_margin_op_only(self):
+        for op in ("cancel_margin_order", "margin_transfer", "set_margin_leverage",
+                   "enable_isolated", "margin_borrow_repay"):
+            with self.subTest(op=op):
+                self.ok(op)
+        # Chỉ khớp op — không check symbol / qty / whitelist / freshness
+        self.ok("cancel_margin_order", symbol="ETHUSDT", timestamp=str(NOW - 10_001))
+        self.ok("margin_transfer", type="MARGIN_MAIN", extra="1")
+        self.ok("enable_isolated", symbol="ETHUSDT")
+        self.rejects("OP_MISMATCH", "margin_transfer", bn(**BN["place_margin_order"]))
+        self.rejects("OP_MISMATCH", "enable_isolated", bn(**BN["set_leverage"]))
 
 
 if __name__ == "__main__":
