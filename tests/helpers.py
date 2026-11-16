@@ -38,7 +38,6 @@ BN = {
     "margin_transfer": dict(type="MAIN_MARGIN", asset="USDC", amount="50",
                             recvWindow="2000", timestamp=str(NOW)),
     "set_margin_leverage": dict(maxLeverage="3", recvWindow="2000", timestamp=str(NOW)),
-    "enable_isolated": dict(symbol="BTCUSDT", recvWindow="2000", timestamp=str(NOW)),
     "margin_borrow_repay": dict(asset="USDC", amount="10", type="REPAY", isIsolated="FALSE",
                                 recvWindow="2000", timestamp=str(NOW)),
 }

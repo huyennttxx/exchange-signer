@@ -195,7 +195,7 @@ BE gửi `POST /exchange` với body `{ "action", "nonce", "signature" }`, kèm 
 
 ## Thao tác được phép
 
-- `op` khác 14 giá trị dưới đây: `403 OP_NOT_ALLOWED`.
+- `op` khác 13 giá trị dưới đây: `403 OP_NOT_ALLOWED`.
 - Payload không khớp với `op` đã khai báo: `403 OP_MISMATCH`. Ví dụ khai `op = set_leverage` nhưng payload lại là lệnh đặt.
 
 | `op` | Endpoint của BE | Binance: payload phải có | Hyperliquid: payload phải có |
@@ -212,7 +212,6 @@ BE gửi `POST /exchange` với body `{ "action", "nonce", "signature" }`, kèm 
 | `cancel_margin_order` | — | `origClientOrderId` + `isIsolated` (→ `DELETE /sapi/v1/margin/order`) | Không hỗ trợ |
 | `margin_transfer` | — | `type` ∈ `MAIN_MARGIN` / `MARGIN_MAIN` / … (→ `POST /sapi/v1/asset/transfer`) | Không hỗ trợ |
 | `set_margin_leverage` | — | `maxLeverage` (→ `POST /sapi/v1/margin/max-leverage`) | Không hỗ trợ |
-| `enable_isolated` | — | `symbol` không kèm marker lệnh khác (→ `POST /sapi/v1/margin/isolated/account`) | Không hỗ trợ |
 | `margin_borrow_repay` | — | `type` = `BORROW` / `REPAY` (→ `POST /sapi/v1/margin/borrow-repay`) | Không hỗ trợ |
 
 Chi tiết policy margin: [`signer-margin.md`](signer-margin.md).
@@ -223,7 +222,7 @@ Không có trong danh sách, và **không bao giờ được ký**:
 - vay và trả nợ trong Earn (`borrowLend` với `operation` = `borrow` / `repay`). Chỉ gửi / rút (`supply` / `withdraw`) được ký;
 - `approveAgent`, `approveBuilderFee`;
 - cancel-all, batch order;
-- đổi chế độ margin futures; lệnh spot thuần (không phải margin op ở trên).
+- đổi chế độ margin futures; bật isolated (`enable_isolated` / `POST /sapi/v1/margin/isolated/account`); lệnh spot thuần (không phải margin op ở trên).
 
 ---
 
@@ -249,7 +248,6 @@ Mỗi thao tác có một danh sách tham số được phép. **Có bất kỳ 
 | Huỷ lệnh margin | `symbol`, `isIsolated`, `origClientOrderId`, `recvWindow`, `timestamp` | — |
 | Chuyển thế chấp margin | `type`, `asset`, `amount`, `fromSymbol`, `toSymbol`, `recvWindow`, `timestamp` | — |
 | Đòn bẩy margin (cross) | `maxLeverage`, `recvWindow`, `timestamp` | — |
-| Bật isolated | `symbol`, `recvWindow`, `timestamp` | — |
 | Vay / trả margin | `asset`, `isIsolated`, `symbol`, `amount`, `type`, `recvWindow`, `timestamp` | — |
 
 Với Hyperliquid, ngoài `action` thì `payload` chỉ được có thêm:
@@ -262,7 +260,7 @@ Field `expiresAfter` không được phép.
 
 | Quy tắc | Binance | Hyperliquid | Lỗi |
 |---|---|---|---|
-| Symbol | `symbol` là một symbol trong section của key (nếu có tham số `symbol`). `place_order`, `place_margin_order` và `enable_isolated` bắt buộc có `symbol` | Mọi `a` / `asset` là chỉ số asset của một symbol trong section của key (tra `<COIN>USDC` trong `signer/hyperliquid_assets.ini`) | `403 SYMBOL_NOT_ALLOWED` |
+| Symbol | `symbol` là một symbol trong section của key (nếu có tham số `symbol`). `place_order` và `place_margin_order` bắt buộc có `symbol` | Mọi `a` / `asset` là chỉ số asset của một symbol trong section của key (tra `<COIN>USDC` trong `signer/hyperliquid_assets.ini`) | `403 SYMBOL_NOT_ALLOWED` |
 | Số lệnh | Một payload là một lệnh (Binance không có batch trong whitelist) | `place_order` và `place_conditional`: mảng `orders` có đúng 1 phần tử | `403 TOO_MANY_ORDERS` |
 | Khối lượng | `0 < quantity < max_qty` của symbol đó. Lệnh `reduceOnly=true`: chỉ cần `quantity > 0`. `place_margin_order` BUY: cùng hạn `max_qty`; **`side=SELL` (đóng vị thế) không kiểm quantity** | `0 < s < max_qty` của symbol đó. Lệnh `r = true`: chỉ cần `s > 0`. `place_conditional` (`positionTpsl`): nhận thêm `s = 0` (đóng cả vị thế) | `403 QTY_EXCEEDS_LIMIT` |
 | Margin place | `type` chỉ `LIMIT` / `LIMIT_MAKER`; `autoRepayAtCancel` bắt buộc `FALSE`; BUY: `sideEffectType` ∈ {`MARGIN_BUY`, `NO_SIDE_EFFECT`}; SELL: ∈ {`AUTO_REPAY`, `NO_SIDE_EFFECT`}. Không nhận `quoteOrderQty` | — | `403 PARAM_NOT_ALLOWED` |
@@ -374,7 +372,6 @@ Giới hạn đi theo từng key, trong section `[key:<key_id>]` của `config.i
 - Huỷ: `symbol=BTCUSDT&isIsolated=FALSE&origClientOrderId=0x…&recvWindow=2000&timestamp=…`
 - Chuyển thế chấp: `type=MAIN_MARGIN&asset=USDC&amount=50&recvWindow=2000&timestamp=…`
 - Đòn bẩy cross: `maxLeverage=3&recvWindow=2000&timestamp=…`
-- Bật isolated: `symbol=BTCUSDT&recvWindow=2000&timestamp=…`
 - Vay/trả riêng: `asset=USDC&amount=10&type=REPAY&isIsolated=FALSE&recvWindow=2000&timestamp=…`
 
 ---
@@ -391,7 +388,7 @@ Khi lỗi, Signer **không bao giờ trả về chữ ký**.
 |---|---|---|
 | 400 | `INVALID_REQUEST` | Body không phải JSON, hoặc `payload` không đọc được |
 | 401 | `UNAUTHENTICATED` | `key_id` không tồn tại hoặc không có section trong config, IP không nằm trong `allowed_ips` của key, hoặc HMAC sai / thiếu / quá cũ |
-| 403 | `OP_NOT_ALLOWED` | `op` không nằm trong 14 thao tác được phép |
+| 403 | `OP_NOT_ALLOWED` | `op` không nằm trong 13 thao tác được phép |
 | 403 | `OP_MISMATCH` | Payload không khớp với `op` đã khai báo |
 | 403 | `PARAM_NOT_ALLOWED` | Có tham số nằm ngoài whitelist; `newOrderRespType` / `priceProtect` sai giá trị; margin: `type` / `side` / `sideEffectType` / `autoRepayAtCancel` sai, hoặc `BORROW` tài sản gốc |
 | 403 | `SYMBOL_NOT_ALLOWED` | Symbol / asset không có trong section của key |

@@ -42,7 +42,6 @@ ALLOWED = {
     "cancel_margin_order": ("symbol", "isIsolated", "origClientOrderId", "recvWindow", "timestamp"),
     "margin_transfer": ("type", "asset", "amount", "fromSymbol", "toSymbol", "recvWindow", "timestamp"),
     "set_margin_leverage": ("maxLeverage", "recvWindow", "timestamp"),
-    "enable_isolated": ("symbol", "recvWindow", "timestamp"),
     "margin_borrow_repay": ("asset", "isIsolated", "symbol", "amount", "type", "recvWindow", "timestamp"),
 }
 
@@ -100,10 +99,6 @@ def detect_op(params: dict) -> str | None:
         return "cancel_conditional"
     if "leverage" in params:
         return "set_leverage"
-    # Bật isolated: đúng tập key allowlist, không đoán từ mọi payload có symbol
-    keys = set(params)
-    if "symbol" in keys and keys <= set(ALLOWED["enable_isolated"]):
-        return "enable_isolated"
     return None
 
 

@@ -173,18 +173,18 @@ class PolicyTest(unittest.TestCase):
 
     def test_margin_whitelist_and_freshness(self):
         for op in ("cancel_margin_order", "margin_transfer", "set_margin_leverage",
-                   "enable_isolated", "margin_borrow_repay"):
+                   "margin_borrow_repay"):
             with self.subTest(op=op):
                 self.ok(op)
                 self.rejects("STALE_PAYLOAD", op, timestamp=str(NOW - 10_001))
         self.rejects("SYMBOL_NOT_ALLOWED", "cancel_margin_order", symbol="ETHUSDT")
         self.rejects("PARAM_NOT_ALLOWED", "margin_transfer", type="MARGIN_MAIN", extra="1")
         self.rejects("PARAM_NOT_ALLOWED", "set_margin_leverage", marginType="ISOLATED")
-        self.rejects("SYMBOL_NOT_ALLOWED", "enable_isolated", symbol="ETHUSDT")
-        # Payload chỉ có symbol không còn là enable_isolated khi thiếu marker / tập key sai
-        self.rejects("OP_MISMATCH", "enable_isolated", "symbol=BTCUSDT&marginType=ISOLATED&timestamp=" + str(NOW))
+        # Payload chỉ có symbol / marginType không khớp op nào
+        self.rejects("OP_MISMATCH", "place_order", "symbol=BTCUSDT&timestamp=" + str(NOW))
+        self.rejects("OP_MISMATCH", "set_leverage",
+                     "symbol=BTCUSDT&marginType=ISOLATED&timestamp=" + str(NOW))
         self.rejects("OP_MISMATCH", "margin_transfer", bn(**BN["place_margin_order"]))
-        self.rejects("OP_MISMATCH", "enable_isolated", bn(**BN["set_leverage"]))
 
     def test_margin_borrow_no_base_asset(self):
         self.ok("margin_borrow_repay", asset="USDC", type="BORROW")

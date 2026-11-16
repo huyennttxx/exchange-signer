@@ -129,7 +129,7 @@ class ServerTest(unittest.TestCase):
 
     def test_binance_margin_ops(self):
         for op in ("place_margin_order", "cancel_margin_order", "margin_transfer",
-                   "set_margin_leverage", "enable_isolated", "margin_borrow_repay"):
+                   "set_margin_leverage", "margin_borrow_repay"):
             with self.subTest(op=op):
                 status, _, body = self.sign(BINANCE_ID, op, bn(**BN[op]))
                 self.assertEqual(status, 200, body)
@@ -138,12 +138,13 @@ class ServerTest(unittest.TestCase):
         close = bn(**{**BN["place_margin_order"], "side": "SELL", "sideEffectType": "AUTO_REPAY",
                       "quantity": "5"})
         self.assertEqual(self.sign(BINANCE_ID, "place_margin_order", close)[0], 200)
-        # Bán khống / tham số lạ / vay base → từ chối
+        # Bán khống / op đã bỏ / vay base → từ chối
         short = bn(**{**BN["place_margin_order"], "side": "SELL", "sideEffectType": "MARGIN_BUY",
                       "quantity": "100"})
         self.assertEqual(self.sign(BINANCE_ID, "place_margin_order", short)[0], 403)
-        blind = bn(symbol="BTCUSDT", marginType="ISOLATED", recvWindow="2000", timestamp=str(NOW))
-        self.assertEqual(self.sign(BINANCE_ID, "enable_isolated", blind)[0], 403)
+        status, _, body = self.sign(BINANCE_ID, "enable_isolated",
+                                    bn(symbol="BTCUSDT", recvWindow="2000", timestamp=str(NOW)))
+        self.assertEqual((status, body["error"]), (403, "OP_NOT_ALLOWED"))
         borrow_base = bn(**{**BN["margin_borrow_repay"], "asset": "BTC", "type": "BORROW"})
         self.assertEqual(self.sign(BINANCE_ID, "margin_borrow_repay", borrow_base)[0], 403)
         # Hyperliquid không hỗ trợ op margin

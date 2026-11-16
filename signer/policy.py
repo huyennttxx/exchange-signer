@@ -6,7 +6,7 @@ from signer.errors import Reject
 OPS = ("place_order", "cancel_order", "place_conditional", "cancel_conditional", "set_leverage",
        "sub_account_transfer", "earn_transfer", "create_sub_account",
        "place_margin_order", "cancel_margin_order", "margin_transfer", "set_margin_leverage",
-       "enable_isolated", "margin_borrow_repay")
+       "margin_borrow_repay")
 
 
 @dataclass(frozen=True)

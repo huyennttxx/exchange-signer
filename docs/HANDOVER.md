@@ -86,7 +86,7 @@ Một op mới thường chạm đúng các chỗ sau — làm đủ cả 8 bư�
 7. `docs/signer-api.md` — bảng *Thao tác được phép* (cập nhật cả số lượng "N giá trị"), whitelist tham số, quy tắc rủi ro, ví dụ payload, bảng lỗi (`OP_NOT_ALLOWED` cũng ghi số op), câu hỏi mở nếu chưa thử testnet.
 8. `README.md` (dòng test SDK đếm số op) và `docs/signer-impl.md` nếu có liên quan.
 
-Hiện có 14 op: `place_order`, `cancel_order`, `place_conditional`, `cancel_conditional`, `set_leverage` (cả hai sàn); `sub_account_transfer`, `earn_transfer`, `create_sub_account` (chỉ Hyperliquid); `place_margin_order`, `cancel_margin_order`, `margin_transfer`, `set_margin_leverage`, `enable_isolated`, `margin_borrow_repay` (chỉ Binance margin — xem [`signer-margin.md`](signer-margin.md)).
+Hiện có 13 op: `place_order`, `cancel_order`, `place_conditional`, `cancel_conditional`, `set_leverage` (cả hai sàn); `sub_account_transfer`, `earn_transfer`, `create_sub_account` (chỉ Hyperliquid); `place_margin_order`, `cancel_margin_order`, `margin_transfer`, `set_margin_leverage`, `margin_borrow_repay` (chỉ Binance margin — xem [`signer-margin.md`](signer-margin.md)).
 
 ## 6. Việc đang dở / cần theo dõi
 

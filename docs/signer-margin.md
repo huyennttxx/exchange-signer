@@ -20,10 +20,9 @@ Nguồn nghiệp vụ: [`binance-margin-api.md`](../binance-margin-api.md) (Đ�
 | `cancel_margin_order` | `DELETE /sapi/v1/margin/order` | Bot | Hủy **một** lệnh margin theo `origClientOrderId` (+ `isIsolated`) | Whitelist; `symbol` ∈ config; freshness. Không ký hủy-all |
 | `margin_transfer` | `POST /sapi/v1/asset/transfer` | App | Chuyển thế chấp spot ↔ cross ↔ isolated (`type` = `MAIN_MARGIN`, `MARGIN_MAIN`, …) | Whitelist; freshness. Không hạn mức `amount` / `asset` |
 | `set_margin_leverage` | `POST /sapi/v1/margin/max-leverage` | App | Đặt đòn bẩy tối đa tài khoản **cross** (`maxLeverage`, Classic: 3 hoặc 5) | Whitelist; freshness. Không so với `max_leverage` config (khác `set_leverage` futures) |
-| `enable_isolated` | `POST /sapi/v1/margin/isolated/account` | App | Bật lại cặp isolated đã từng tắt (`symbol`). Lần đầu Binance có thể bắt bật trên web | Whitelist (`symbol`,`recvWindow`,`timestamp`); `symbol` ∈ config; freshness. Không đoán op từ mọi payload chỉ có `symbol` |
 | `margin_borrow_repay` | `POST /sapi/v1/margin/borrow-repay` | App | Vay hoặc trả nợ **riêng** (`type` = `BORROW` / `REPAY`), vd. nợ còn sau hủy với `autoRepayAtCancel=FALSE` | Whitelist; freshness; **`BORROW` không được vay tài sản gốc** (vd. `BTC` của `BTCUSDT`). Không hạn mức `amount` |
 
-Không có op: đặt đòn bẩy isolated (không API); đọc lệnh / GET (không qua Signer); hủy mọi lệnh cặp (bot không dùng).
+Không có op: bật isolated (`POST /sapi/v1/margin/isolated/account` — chữ ký trùng hình dạng hủy futures); đặt đòn bẩy isolated (không API); đọc lệnh / GET (không qua Signer); hủy mọi lệnh cặp (bot không dùng).
 
 Vay/trả lúc mua/bán vẫn nằm trong `place_margin_order` (`sideEffectType`), không cần op riêng.
 
@@ -37,7 +36,7 @@ Phân biệt: `set_leverage` futures (`POST /fapi/v1/leverage`, có check `max_l
 |---|---|---|---|---|
 | Chuyển thế chấp vào/ra tài khoản margin | `POST /sapi/v1/asset/transfer` (`MAIN_MARGIN`, `MARGIN_MAIN`, …; isolated qua `fromSymbol` / `toSymbol`) | Có | Người vận hành | app + Signer |
 | Đổi đòn bẩy cross | `POST /sapi/v1/margin/max-leverage` (`maxLeverage` 3 hoặc 5 trên Classic) | Có | Người vận hành | app + Signer |
-| Bật cặp isolated (nếu bot chạy isolated) | API `POST /sapi/v1/margin/isolated/account` (tài liệu Binance: lần đầu có thể phải bật trên web; API bật lại cặp đã từng tắt) | Có | Người vận hành | app + Signer (khi dùng API) |
+| Bật cặp isolated (nếu bot chạy isolated) | API `POST /sapi/v1/margin/isolated/account` (tài liệu Binance: lần đầu có thể phải bật trên web; API bật lại cặp đã từng tắt) | Không (Signer không ký — tránh tái dùng chữ ký hủy futures) | Người vận hành | web / ngoài Signer |
 | Đặt đòn bẩy isolated | Không có API đặt; đòn bẩy theo bậc cặp | Không | — | không dùng |
 | Đọc tier / ngưỡng isolated | `GET …/isolatedMarginTier` (và tương tự) | Không | — | không qua Signer |
 
@@ -57,7 +56,7 @@ Phân biệt: `set_leverage` futures (`POST /fapi/v1/leverage`, có check `max_l
 | Op | Signer kiểm tra |
 |---|---|
 | Đặt lệnh | Whitelist; `symbol` ∈ config; `type` ∈ {`LIMIT`,`LIMIT_MAKER`}; `autoRepayAtCancel` = `FALSE`; BUY: `sideEffectType` ∈ {`MARGIN_BUY`,`NO_SIDE_EFFECT`} + `0 < quantity < max_qty`; SELL: `sideEffectType` ∈ {`AUTO_REPAY`,`NO_SIDE_EFFECT`}, **không check quantity**; freshness |
-| Hủy / chuyển / đòn bẩy / isolated / borrow-repay | Whitelist theo op; freshness; `symbol` ∈ config nếu có; `BORROW` không vay tài sản gốc |
+| Hủy / chuyển / đòn bẩy / borrow-repay | Whitelist theo op; freshness; `symbol` ∈ config nếu có; `BORROW` không vay tài sản gốc |
 
 ### Tham số được phép (whitelist Signer)
 
@@ -92,4 +91,4 @@ Hủy: `symbol`, `isIsolated`, `origClientOrderId`, `recvWindow`, `timestamp`.
 
 ## Ràng buộc chữ ký Binance
 
-Chữ ký Binance **không** gắn path/method. Cùng query string có thể bị gửi sang endpoint khác (vd. chữ ký `enable_isolated` với `symbol`+`timestamp` trùng hình dạng `DELETE /fapi/v1/allOpenOrders`). Mitigation trong Signer: whitelist tham số theo op, `symbol` ∈ config, không đoán op từ payload thừa/thiếu marker. Nên tách key futures khỏi key margin (quyền Spot & Margin / loan / transfer).
+Chữ ký Binance **không** gắn path/method. Cùng query string có thể bị gửi sang endpoint khác — đó là lý do Signer **không** ký bật isolated (`symbol`+`timestamp` trùng hình dạng `DELETE /fapi/v1/allOpenOrders`). Mitigation còn lại: whitelist tham số theo op, `symbol` ∈ config, không đoán op từ payload thừa/thiếu marker. Nên tách key futures khỏi key margin (quyền Spot & Margin / loan / transfer).

@@ -111,7 +111,7 @@ pip install -r requirements-test.txt
 python -m unittest discover -s tests -t .
 ```
 
-Test chữ ký Hyperliquid so từng byte với `sign_l1_action` của SDK (8 op Hyperliquid, gồm 2 action chuyển sub-account, `borrowLend` và `createSubAccount`, × mainnet/testnet, và 299 key khác nhau); tự bỏ qua nếu chưa cài SDK. Binance thêm 6 op margin (`place_margin_order`, …).
+Test chữ ký Hyperliquid so từng byte với `sign_l1_action` của SDK (8 op Hyperliquid, gồm 2 action chuyển sub-account, `borrowLend` và `createSubAccount`, × mainnet/testnet, và 299 key khác nhau); tự bỏ qua nếu chưa cài SDK. Binance thêm 5 op margin (`place_margin_order`, …).
 
 ## Các quyết định đang tạm chọn
 
