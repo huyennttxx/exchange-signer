@@ -14,11 +14,11 @@
   - Nó không gọi sàn và không đọc giá thị trường.
 - **BE tự dựng payload theo đúng định dạng của sàn.** Signer làm ba việc:
   1. **Verify:** đọc payload và kiểm tra nó đúng là thao tác `op` mà BE khai báo.
-  2. **Duyệt:** với op đặt lệnh — kiểm symbol và qty (lệnh đóng thì bỏ qty); op khác chỉ khớp `op`.
+  2. **Duyệt:** kiểm tra rủi ro theo policy.
   3. **Ký:** trả về chữ ký.
 - BE gắn chữ ký vào payload rồi tự gửi lên sàn.
-- **Signer không ký mù** đối với loại action lạ (không khớp `op` / không nằm trong danh sách). Tham số chi tiết ngoài symbol/qty của lệnh đặt do BE chịu.
-- **Signer chỉ kiểm tra rủi ro hẹp, không kiểm tra định dạng.** Ví dụ giá sai, `tif` sai, `vaultAddress` sai thì sàn / BE tự chịu.
+- **Signer không ký mù.** Payload nào không nhận ra được, hoặc có tham số nằm ngoài danh sách cho phép, đều bị từ chối.
+- **Signer chỉ kiểm tra rủi ro, không kiểm tra định dạng.** Ví dụ giá sai định dạng hay `tif` sai thì sàn sẽ từ chối; caller tự chịu.
 
 ## Danh sách endpoint
 
@@ -105,7 +105,7 @@ requests.post(url, data=body, headers={"Content-Type": "application/json",
 
 Test vector: secret `00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff`, timestamp `1729500000000`, body `{"key_id":"k","op":"set_leverage","payload":"x"}` → `X-Signer-Signature` = `e6e89edb2cf9daa6f06be6711e3836dbdf475e84ffa46e24f21f1dd62d40858b`.
 
-**Không có chống replay riêng** (không lưu chữ ký đã thấy). Lý do: trong cửa sổ `max_payload_age_ms` của HMAC, gửi lại đúng request chỉ nhận lại đúng chữ ký đã trả (Ed25519 và ECDSA RFC 6979 đều tất định), mà kẻ nghe lén được request thì cũng đã thấy response. Signer **không** kiểm tra độ mới của `timestamp` / `nonce` trong payload.
+**Không có chống replay riêng** (không lưu chữ ký đã thấy). Lý do: trong cửa sổ `max_payload_age_ms`, gửi lại đúng request chỉ nhận lại đúng chữ ký đã trả (Ed25519 và ECDSA RFC 6979 đều tất định), mà kẻ nghe lén được request thì cũng đã thấy response. Payload bên trong vẫn bị giới hạn bởi quy tắc `STALE_PAYLOAD`.
 
 **Đổi secret:** `./signer.sh rotate-hmac <key_id>` (hoặc menu → Xem key → Tạo HMAC secret mới), rồi `kill -HUP` / restart. Secret cũ hết hiệu lực ngay khi Signer nạp lại, nên cập nhật BE cùng lúc.
 
@@ -125,9 +125,9 @@ Kiểm tra Signer còn sống, và cho biết giờ của Signer.
 |---|---|
 | `time_ms` | Giờ hiện tại của Signer, Unix epoch tính bằng mili giây |
 
-HMAC so `X-Signer-Timestamp` với giờ của Signer (`max_payload_age_ms`), mà Signer không có outbound network nên đồng hồ có thể trôi. Gợi ý cho BE:
+Quy tắc `STALE_PAYLOAD` so `timestamp` / `nonce` với giờ của Signer, mà Signer không có outbound network nên đồng hồ có thể trôi. Gợi ý cho BE:
 - Định kỳ gọi `/health` và tính độ lệch: `time_ms − (t_gửi + t_nhận) / 2`, với `t_gửi`, `t_nhận` là giờ của BE lúc gửi và lúc nhận response.
-- Cảnh báo khi độ lệch vượt khoảng `max_payload_age_ms / 2`. Nếu để lệch tới `max_payload_age_ms`, Signer sẽ từ chối mọi request (HMAC `STALE_PAYLOAD`).
+- Cảnh báo khi độ lệch vượt khoảng `max_payload_age_ms / 2`. Nếu để lệch tới `max_payload_age_ms`, Signer sẽ từ chối mọi request, kể cả huỷ lệnh và đặt lệnh bảo hiểm.
 
 ---
 
@@ -206,7 +206,7 @@ BE gửi `POST /exchange` với body `{ "action", "nonce", "signature" }`, kèm 
 | `cancel_conditional` | `DELETE /v1/conditional/{client_algo_id}` | `clientAlgoId`, không có `algoType` (→ `DELETE /fapi/v1/algoOrder`) | `action.type = "cancelByCloid"` |
 | `set_leverage` | `POST /v1/leverage` | `leverage` (→ `POST /fapi/v1/leverage`) | `action.type = "updateLeverage"` |
 | `sub_account_transfer` | — | Không hỗ trợ (luôn `403 OP_MISMATCH`) | `action.type = "subAccountTransfer"` (USDC perp) hoặc `"subAccountSpotTransfer"` (token spot) |
-| `earn_transfer` | — | Không hỗ trợ (luôn `403 OP_MISMATCH`) | `action.type = "borrowLend"` (mọi `operation`; BE tự giới hạn supply/withdraw nếu cần) |
+| `earn_transfer` | — | Không hỗ trợ (luôn `403 OP_MISMATCH`) | `action.type = "borrowLend"`, `operation` là `"supply"` hoặc `"withdraw"` |
 | `create_sub_account` | — | Không hỗ trợ (luôn `403 OP_MISMATCH`) | `action.type = "createSubAccount"` |
 | `place_margin_order` | — | `sideEffectType` / `autoRepayAtCancel` / (`isIsolated`+`type`) (→ `POST /sapi/v1/margin/order`) | Không hỗ trợ (`403 OP_MISMATCH`) |
 | `cancel_margin_order` | — | `origClientOrderId` + `isIsolated` (→ `DELETE /sapi/v1/margin/order`) | Không hỗ trợ |
@@ -217,30 +217,67 @@ BE gửi `POST /exchange` với body `{ "action", "nonce", "signature" }`, kèm 
 
 Chi tiết policy margin: [`signer-margin.md`](signer-margin.md).
 
-Không có trong danh sách op (detect không khớp) thì **không được ký**, ví dụ: `withdraw3`, `usdSend`, `spotSend`, `sendAsset`, `approveAgent`, `approveBuilderFee`, `subAccountModify`, cancel-all, đổi chế độ margin futures, lệnh spot thuần (không phải margin op ở trên). Chuyển thế chấp margin (`margin_transfer`) và master ↔ sub-account Hyperliquid (`sub_account_transfer`) nằm trong danh sách được ký.
+Không có trong danh sách, và **không bao giờ được ký**:
+- rút tiền ra ngoài (`withdraw3`, `usdSend`, `spotSend`, `sendAsset`, …). Chuyển thế chấp margin (`margin_transfer`) và master ↔ sub-account Hyperliquid (`sub_account_transfer`) được ký;
+- sửa sub-account (`subAccountModify`). Chỉ tạo sub-account mới (`create_sub_account`) được ký;
+- vay và trả nợ trong Earn (`borrowLend` với `operation` = `borrow` / `repay`). Chỉ gửi / rút (`supply` / `withdraw`) được ký;
+- `approveAgent`, `approveBuilderFee`;
+- cancel-all, batch order;
+- đổi chế độ margin futures; lệnh spot thuần (không phải margin op ở trên).
 
 ---
 
 ## Policy
 
-### Nguyên tắc
+### Chỉ nhận tham số trong whitelist
 
-1. **Khớp `op`:** payload phải đúng loại thao tác đã khai báo (`403 OP_MISMATCH` nếu không).
-2. **Op tạo lệnh** (`place_order`, `place_conditional`, và Binance `place_margin_order`): kiểm **symbol/asset** và **qty**. Lệnh đóng thì **không** kiểm qty.
-3. **Mọi op khác:** chỉ khớp `op` — không whitelist tham số, không kiểm đòn bẩy, freshness payload, vaultAddress, v.v. BE chịu trách nhiệm nội dung.
+Mỗi thao tác có một danh sách tham số được phép. **Có bất kỳ tham số nào khác thì từ chối** (`403 PARAM_NOT_ALLOWED`).
 
-### Quy tắc rủi ro (chỉ op đặt lệnh)
+Đây là kiểm tra rủi ro chứ không phải kiểm tra định dạng: một tham số lạ có thể làm đổi ý nghĩa của request, ví dụ `batchOrders`, `vaultAddress` hay `builder`.
+
+| Thao tác | Binance: tham số được phép | Hyperliquid: field được phép |
+|---|---|---|
+| Đặt lệnh | `symbol`, `side`, `type`, `quantity`, `price`, `timeInForce`, `reduceOnly`, `newClientOrderId`, `newOrderRespType` (chỉ `RESULT`), `recvWindow`, `timestamp` | `action`: `type`, `orders`, `grouping`. Mỗi phần tử trong `orders`: `a`, `b`, `p`, `s`, `r`, `t`, `c` |
+| Huỷ lệnh | `symbol`, `origClientOrderId`, `recvWindow`, `timestamp` | `action`: `type`, `cancels`. Mỗi phần tử: `asset`, `cloid` |
+| Đặt lệnh bảo hiểm | `algoType`, `symbol`, `side`, `type`, `triggerPrice`, `closePosition`, `workingType`, `priceProtect` (chỉ `false`), `clientAlgoId`, `recvWindow`, `timestamp` | Giống "Đặt lệnh" |
+| Huỷ lệnh bảo hiểm | `symbol`, `clientAlgoId`, `recvWindow`, `timestamp` | Giống "Huỷ lệnh" |
+| Đổi đòn bẩy | `symbol`, `leverage`, `recvWindow`, `timestamp` | `action`: `type`, `asset`, `isCross`, `leverage` |
+| Chuyển master ↔ sub-account | — | `subAccountTransfer`: `type`, `subAccountUser`, `isDeposit`, `usd`. `subAccountSpotTransfer`: `type`, `subAccountUser`, `isDeposit`, `token`, `amount` |
+| Gửi / rút Earn | — | `action`: `type`, `operation`, `token`, `amount` |
+| Tạo sub-account | — | `action`: `type`, `name` |
+| Đặt lệnh margin | Không whitelist tham số. Chỉ kiểm `symbol` / `quantity` theo config (xem quy tắc rủi ro) | — |
+| Huỷ margin / chuyển thế chấp / đòn bẩy margin / bật isolated / borrow-repay | Không whitelist; chỉ khớp `op` | — |
+
+Với Hyperliquid, ngoài `action` thì `payload` chỉ được có thêm:
+- `nonce`
+- `vaultAddress` (tuỳ chọn): địa chỉ sub-account hoặc vault mà lệnh được thực hiện trên đó. Phải là `null` hoặc chuỗi `0x` + 40 ký tự hex; sai định dạng thì trả `400 INVALID_REQUEST`. Không có hoặc `null` thì lệnh áp dụng cho chính tài khoản của agent key. Với `sub_account_transfer` và `create_sub_account`, `vaultAddress` phải không có hoặc `null` (sai thì `403 PARAM_NOT_ALLOWED`): sub-account nằm trong `action.subAccountUser`.
+
+Field `expiresAfter` không được phép.
+
+### Quy tắc rủi ro
 
 | Quy tắc | Binance | Hyperliquid | Lỗi |
 |---|---|---|---|
-| Symbol | `place_order` / `place_conditional` / `place_margin_order`: `symbol` phải có trong section của key | Mỗi phần tử trong `orders`: `a` là chỉ số asset của một symbol trong section (tra `<COIN>USDC` trong `signer/hyperliquid_assets.ini`) | `403 SYMBOL_NOT_ALLOWED` |
-| Khối lượng | `0 < quantity < max_qty` của symbol. **Không kiểm** nếu lệnh đóng: `place_order` với `reduceOnly=true`, `place_conditional` với `closePosition=true`, `place_margin_order` với `side=SELL` | `0 < s < max_qty` của asset. **Không kiểm** nếu `r = true` (giảm / đóng). Mọi phần tử trong `orders` đều được kiểm | `403 QTY_EXCEEDS_LIMIT` |
+| Symbol | `symbol` là một symbol trong section của key (nếu có tham số `symbol`). `place_order` và `place_margin_order` bắt buộc có `symbol`. Các op margin chỉ-khớp-op không kiểm symbol | Mọi `a` / `asset` là chỉ số asset của một symbol trong section của key (tra `<COIN>USDC` trong `signer/hyperliquid_assets.ini`) | `403 SYMBOL_NOT_ALLOWED` |
+| Số lệnh | Một payload là một lệnh (Binance không có batch trong whitelist) | `place_order` và `place_conditional`: mảng `orders` có đúng 1 phần tử | `403 TOO_MANY_ORDERS` |
+| Khối lượng | `0 < quantity < max_qty` của symbol đó. Lệnh `reduceOnly=true`: chỉ cần `quantity > 0`. `place_margin_order`: cùng hạn `max_qty` config; **`side=SELL` (đóng vị thế) không kiểm quantity** | `0 < s < max_qty` của symbol đó. Lệnh `r = true`: chỉ cần `s > 0`. `place_conditional` (`positionTpsl`): nhận thêm `s = 0` (đóng cả vị thế) | `403 QTY_EXCEEDS_LIMIT` |
+| Đòn bẩy | `1 ≤ leverage ≤ max_leverage` của key | `1 ≤ leverage ≤ max_leverage` của key, và `isCross = true` | `403 LEVERAGE_EXCEEDS_LIMIT` |
+| Lệnh bảo hiểm phải đóng vị thế | `closePosition = true`, `type` là `STOP_MARKET` hoặc `TAKE_PROFIT_MARKET` | Mọi lệnh có `r = true` và `t.trigger` | `403 MUST_CLOSE_POSITION` |
+| Chuyển master ↔ sub-account | — | `subAccountUser` là `0x` + 40 hex, `isDeposit` là `true` / `false`, `token` dạng `<tên>:0x` + 32 hex (sai thì `400 INVALID_REQUEST`). `usd` là số nguyên `> 0` (đơn vị 1e-6 USDC: `1000000` = 1 USDC); `amount` là chuỗi số thập phân `> 0` | `403 QTY_EXCEEDS_LIMIT` |
+| Gửi / rút Earn | — | `operation` là `supply` hoặc `withdraw` (khác thì `403 PARAM_NOT_ALLOWED`). `token` là chỉ số token, số nguyên `≥ 0`, mọi token (`0` = USDC; sai thì `400 INVALID_REQUEST`). `amount` là chuỗi số thập phân `> 0`, hoặc `null` = toàn bộ | `403 QTY_EXCEEDS_LIMIT` |
+| Tạo sub-account | — | `name` là chuỗi 1–64 ký tự in được, không có khoảng trắng ở đầu / cuối | `400 INVALID_REQUEST` |
+| Payload còn mới | `timestamp` lệch so với giờ Signer không quá `max_payload_age_ms`; `recvWindow ≤ 20000` | `nonce` lệch so với giờ Signer không quá `max_payload_age_ms` | `403 STALE_PAYLOAD` |
 
-Giải thích ngắn:
-- **Lệnh đóng không giới hạn qty** — chỉ còn chặn mở / tăng vị thế vượt `max_qty`.
-- **Huỷ, đòn bẩy, chuyển tiền, Earn, tạo sub-account, …** — Signer chỉ xác nhận đúng loại action; không siết tham số.
-- `price`, `tif`, `nonce`, `vaultAddress`, `builder`, … do BE / sàn chịu.
-- Gợi ý cho BE: `client_order_id` / `client_algo_id` nên dạng `0x` + 32 hex (hợp lệ cho cả Binance và Hyperliquid `cloid`).
+Giải thích các quy tắc dễ bị hiểu nhầm:
+- **Chuyển master ↔ sub-account không có hạn mức và không phụ thuộc symbol của key.** Sàn chỉ nhận `subAccountUser` là sub-account của chính master đã ký, nên tiền không ra khỏi các tài khoản của mình. `isDeposit = true`: master → sub; `false`: sub → master.
+- **Gửi / rút Earn không có hạn mức, không phụ thuộc symbol của key, nhận mọi token.** Tiền chỉ chuyển giữa số dư spot và Earn của cùng tài khoản. `vaultAddress` dùng được như với lệnh đặt (gửi / rút trên sub-account). Lệnh rút có thể bị sàn từ chối khi pool đang được vay 100%.
+- **Tạo sub-account không có hạn mức và không phụ thuộc symbol của key.** Sub-account mới thuộc master đã ký, chưa có tiền; không có tiền nào được chuyển. Sàn tự giới hạn số sub-account mỗi master.
+- **Mỗi request chỉ một lệnh.** Nếu cho phép batch, BE có thể gửi 100 lệnh, mỗi lệnh nhỏ hơn hạn mức, và tổng cộng vượt hạn mức rất xa.
+- **Payload phải còn mới.** Mục đích là chặn việc ký trước rồi giữ lại để dùng sau. Hyperliquid chấp nhận nonce cũ tới khoảng 2 ngày, nên nếu Signer không kiểm tra thì một chữ ký có thể bị giữ lại và dùng rất lâu sau đó.
+
+Ngoài các quy tắc trên, Signer không kiểm tra gì thêm.
+- `price`, `p`, `triggerPrice`, `tif`, `c`, `newClientOrderId`… đều do BE chịu trách nhiệm.
+- Gợi ý cho BE: `client_order_id` và `client_algo_id` nên có dạng `0x` + 32 ký tự hex, vì định dạng này hợp lệ cho cả `cloid` của Hyperliquid lẫn `newClientOrderId` của Binance.
 
 ### Giới hạn
 
@@ -249,9 +286,10 @@ Giới hạn đi theo từng key, trong section `[key:<key_id>]` của `config.i
 | Tên | Nằm ở | Ý nghĩa | Giá trị |
 |---|---|---|---|
 | `allowed_ips` | `[key:…]` | IP của BE được gọi bằng key này | Theo key |
-| `<symbol> = <max_qty>` | `[key:…]` | Symbol được đặt lệnh và khối lượng tối đa (so sánh `<`); không áp dụng khi lệnh đóng | Theo key |
-| `max_leverage` | `[key:…]` | Có trong config (tương thích); **verify hiện không dùng** | Theo key |
-| `max_payload_age_ms` | `[server]` | Độ lệch tối đa của `X-Signer-Timestamp` (HMAC) so với giờ Signer | `60000` (1 phút) |
+| `<symbol> = <max_qty>` | `[key:…]` | Symbol được ký và khối lượng tối đa của một lệnh (so sánh `<`), không áp dụng cho lệnh reduce-only | Theo key |
+| `max_leverage` | `[key:…]` | Đòn bẩy tối đa | Theo key |
+| `max_payload_age_ms` | `[server]` | Độ lệch tối đa của `timestamp` / `nonce` so với giờ Signer | `60000` (1 phút) |
+| `recvWindow` tối đa của Binance | Cố định trong code (`MAX_RECV_WINDOW_MS`), không có trong config | `20000` (20 giây) |
 
 ---
 
@@ -348,10 +386,13 @@ Khi lỗi, Signer **không bao giờ trả về chữ ký**.
 | 401 | `UNAUTHENTICATED` | `key_id` không tồn tại hoặc không có section trong config, IP không nằm trong `allowed_ips` của key, hoặc HMAC sai / thiếu / quá cũ |
 | 403 | `OP_NOT_ALLOWED` | `op` không nằm trong 14 thao tác được phép |
 | 403 | `OP_MISMATCH` | Payload không khớp với `op` đã khai báo |
-| 403 | `SYMBOL_NOT_ALLOWED` | Symbol / asset không có trong section của key (chỉ op đặt lệnh) |
-| 403 | `QTY_EXCEEDS_LIMIT` | Khối lượng `≤ 0`, `≥ max_qty`, hoặc không đọc được thành số (chỉ op đặt lệnh khi không phải lệnh đóng) |
-| 403 | `STALE_PAYLOAD` | `X-Signer-Timestamp` (HMAC) quá cũ hoặc ở tương lai |
-| 403 | `PARAM_NOT_ALLOWED` / `TOO_MANY_ORDERS` / `LEVERAGE_EXCEEDS_LIMIT` / `MUST_CLOSE_POSITION` | Còn trong mã lỗi (tương thích); verify hiện không trả |
+| 403 | `PARAM_NOT_ALLOWED` | Có tham số nằm ngoài whitelist, hoặc `newOrderRespType` / `priceProtect` có giá trị khác giá trị được phép |
+| 403 | `SYMBOL_NOT_ALLOWED` | Symbol / asset không có trong section của key |
+| 403 | `TOO_MANY_ORDERS` | Mảng `orders` của Hyperliquid không có đúng 1 lệnh |
+| 403 | `QTY_EXCEEDS_LIMIT` | Khối lượng `≤ 0` (`< 0` với lệnh `positionTpsl`), `≥ max_qty` của symbol (trừ lệnh reduce-only), hoặc không đọc được thành số. Với `sub_account_transfer` / `earn_transfer`: `usd` / `amount` không hợp lệ |
+| 403 | `LEVERAGE_EXCEEDS_LIMIT` | Đòn bẩy ngoài khoảng `1…max_leverage` của key, hoặc không phải cross |
+| 403 | `MUST_CLOSE_POSITION` | Lệnh bảo hiểm không phải lệnh đóng vị thế |
+| 403 | `STALE_PAYLOAD` | `timestamp` / `nonce` quá cũ hoặc ở tương lai, hoặc `recvWindow` quá lớn |
 | 503 | `KEY_NOT_LOADED` | Key tồn tại nhưng hiện chưa dùng được để ký (bản ghi lỗi, hoặc chưa có HMAC secret) |
 | 500 | `INTERNAL` | Lỗi không lường trước |
 

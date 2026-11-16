@@ -56,7 +56,7 @@ Phân biệt: `set_leverage` futures hiện có (`POST /fapi/v1/leverage`) khác
 
 | Op | Signer kiểm tra | Không kiểm |
 |---|---|---|
-| Đặt lệnh | `symbol` (allowlist config). `quantity` theo `max_qty` config; **đóng vị thế (`side=SELL`) → không check quantity** — cùng policy với futures `place_order` / `place_conditional` | Mọi tham số còn lại |
+| Đặt lệnh | `symbol` (allowlist config). `quantity` theo `max_qty` config; **đóng vị thế (`side=SELL`) → không check quantity** | Mọi tham số còn lại |
 | Mọi op khác trong bảng tổng kết (hủy, chuyển thế chấp, đòn bẩy, bật isolated, borrow-repay) | Chỉ verify đúng `op` | Không verify tham số hay quy tắc rủi ro khác |
 
 ### Tham số thường gửi (tham khảo, không phải rule Signer trừ `symbol`/`quantity` khi đặt)

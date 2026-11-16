@@ -21,7 +21,7 @@ Dịch vụ HTTP nhỏ ký lệnh cho **Binance USDⓈ-M Futures** (Ed25519) và
 Luồng `/v1/sign` (trong `server.Signer`):
 
 ```
-IP allowlist(key_id) → HMAC(key_id) → venue của key → parse payload → khớp op → (place: symbol+qty) → ký
+IP allowlist(key_id) → HMAC(key_id) → venue của key → parse payload → khớp op → whitelist tham số → quy tắc rủi ro → ký
 ```
 
 Bất kỳ bước nào lỗi → `Reject(code, message)` → JSON lỗi, không bao giờ trả chữ ký.

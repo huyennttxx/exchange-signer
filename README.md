@@ -98,10 +98,11 @@ ETHUSDC = 2
 
 | Quy tắc | Binance | Hyperliquid |
 |---|---|---|
-| Khớp `op` | Mọi op | Mọi op |
-| Symbol + qty | Chỉ `place_order` / `place_conditional` / `place_margin_order` | Chỉ `place_order` / `place_conditional` (mọi phần tử `orders`) |
-| Lệnh đóng (bỏ qty) | `reduceOnly=true` / `closePosition=true` / margin `side=SELL` | `r = true` |
-| Op khác | Chỉ khớp `op` | Chỉ khớp `op` |
+| Symbol | `symbol` thuộc section của key; `place_order` bắt buộc có `symbol` | Mọi `a` / `asset` là asset của một symbol trong section |
+| Khối lượng | `0 < quantity < max_qty`; `reduceOnly=true` thì không giới hạn trên | `0 < s < max_qty`; `r = true` thì không giới hạn trên; lệnh bảo hiểm (`positionTpsl`) nhận `s = "0"` = đóng cả vị thế |
+| Đòn bẩy | `1 ≤ leverage ≤ max_leverage` | Như Binance, và `isCross = true` |
+| Lệnh bảo hiểm | `closePosition=true`, `STOP_MARKET` / `TAKE_PROFIT_MARKET` | `r = true` và `t.trigger` |
+| Tham số thêm | `newOrderRespType=RESULT` (đặt lệnh), `priceProtect=false` (lệnh bảo hiểm) | — |
 
 ## Test
 
@@ -130,7 +131,7 @@ Những mục trong "Quyết định cần chốt" của [`docs/signer-impl.md`]
 
 - Key không giải mã được lúc khởi động (file bị sửa) vẫn được nạp ở trạng thái lỗi: request qua IP allowlist nhận `503 KEY_NOT_LOADED`. Key chưa có HMAC (`list` hiện `(no HMAC)`) cũng vậy cho tới khi `rotate-hmac`.
 - Body JSON có key lặp, `NaN`/`Infinity`, hoặc field ngoài `key_id`/`op`/`payload` → `400 INVALID_REQUEST`.
-- Op không phải đặt lệnh: Signer chỉ khớp `op`, không kiểm symbol/qty/tham số.
+- Hyperliquid `cancelByCloid` không giới hạn số phần tử, nhưng mọi `asset` phải thuộc section của key.
 
 ## Nâng cấp từ bản cũ
 
